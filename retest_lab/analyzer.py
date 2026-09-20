@@ -110,13 +110,14 @@ def _literal_text(
 def _static_env_before(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     lineno: int,
+    initial: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Resolve only straight-line local constants assigned before a call.
 
     This deliberately ignores branch-dependent/nested assignments. Unknown
     writes invalidate a previously known value instead of guessing.
     """
-    env: dict[str, object] = {}
+    env: dict[str, object] = dict(initial or {})
 
     for stmt in func.body:
         stmt_line = getattr(stmt, "lineno", 0)
@@ -154,6 +155,75 @@ def _iter_calls_in_order(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterab
             calls.append((getattr(node, "lineno", 0), getattr(node, "col_offset", 0), node))
     for _, _, call in sorted(calls, key=lambda x: (x[0], x[1])):
         yield call
+
+
+def _parameter_names(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[str]:
+    args = list(func.args.posonlyargs) + list(func.args.args)
+    return [arg.arg for arg in args]
+
+
+def _infer_parameter_envs(
+    parsed: list[tuple[Path, ast.Module]],
+    function_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> dict[str, dict[str, object]]:
+    """Infer only callsite-invariant static argument values.
+
+    A parameter is propagated into a callee only when every observed callsite
+    provides the same statically-known value. Conflicts or unknown arguments
+    deliberately erase the binding rather than guessing.
+    """
+    observations: dict[str, dict[str, list[object | None]]] = {}
+
+    for _path, tree in parsed:
+        for caller in tree.body:
+            if not isinstance(caller, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in _iter_calls_in_order(caller):
+                name = _call_name(call) or ""
+                callee_name = name.split(".")[-1]
+                callee = function_defs.get(callee_name)
+                if callee is None or callee_name == caller.name:
+                    continue
+
+                caller_env = _static_env_before(
+                    caller,
+                    getattr(call, "lineno", 0),
+                )
+                params = _parameter_names(callee)
+                supplied: dict[str, ast.AST] = {}
+
+                for index, arg in enumerate(call.args):
+                    if index < len(params):
+                        supplied[params[index]] = arg
+                for kw in call.keywords:
+                    if kw.arg in params:
+                        supplied[kw.arg] = kw.value
+
+                bucket = observations.setdefault(callee_name, {})
+                for param in params:
+                    values = bucket.setdefault(param, [])
+                    node = supplied.get(param)
+                    values.append(
+                        _static_value(node, caller_env)
+                        if node is not None
+                        else None
+                    )
+
+    resolved: dict[str, dict[str, object]] = {}
+    for callee_name, params in observations.items():
+        env: dict[str, object] = {}
+        for param, values in params.items():
+            if not values or any(value is None for value in values):
+                continue
+            first = values[0]
+            if all(value == first for value in values[1:]):
+                env[param] = first
+        if env:
+            resolved[callee_name] = env
+
+    return resolved
 
 
 def _workflow_triggers_and_prod(path: Path) -> tuple[set[str], bool]:
@@ -255,6 +325,7 @@ def build_graph(repo: str | Path) -> Graph:
     _add_shell_script_edges(repo, graph)
 
     function_names: set[str] = set()
+    function_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     parsed: list[tuple[Path, ast.Module]] = []
     for py in sorted(repo.rglob("*.py")):
         if ".git" in py.parts:
@@ -267,6 +338,9 @@ def build_graph(repo: str | Path) -> Graph:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 function_names.add(node.name)
+                function_defs[node.name] = node
+
+    parameter_envs = _infer_parameter_envs(parsed, function_defs)
 
     for py, tree in parsed:
         rel = py.relative_to(repo)
@@ -281,7 +355,11 @@ def build_graph(repo: str | Path) -> Graph:
             for call in _iter_calls_in_order(func):
                 name = _call_name(call) or ""
                 evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
-                env = _static_env_before(func, getattr(call, "lineno", 0))
+                env = _static_env_before(
+                    func,
+                    getattr(call, "lineno", 0),
+                    parameter_envs.get(func.name),
+                )
 
                 if name.split(".")[-1] in BOUNDARY_CALLS and call.args:
                     label = _literal_text(call.args[0], env)
