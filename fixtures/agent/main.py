@@ -41,5 +41,12 @@ def agent_external_script_bypass():
     subprocess.run(["bash", "scripts/deploy.sh"], check=True)
 
 
+def agent_dataflow_bypass():
+    workflow = "deploy.yml"
+    executable = "gh"
+    cmd = [executable, "workflow", "run", workflow]
+    subprocess.run(cmd, check=True)
+
+
 def fake_post(url: str):
     pass
