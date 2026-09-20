@@ -159,7 +159,27 @@ It answers a narrower question than the policy evaluator above:
 > From this repository entrypoint, can the current model trace a path to this
 > GitHub workflow consequence?
 
-Run it from the repository root:
+### First run
+
+Install the repository as a local CLI package:
+
+```sh
+python -m pip install .
+```
+
+Then check the existing consequence-boundary property:
+
+```sh
+consequence-boundary . --consequence production_deploy --boundary P
+```
+
+A proven bypass exits with code `1` and reports
+`COUNTEREXAMPLE_FOUND`, including the alternate path and its evidence.
+`COVERED_WITHIN_MODEL` is deliberately not a repository-wide safety
+guarantee.
+
+For lower-level root-to-target path tracing, the experimental path CLI
+remains available:
 
 ```sh
 python -m retest_lab scan --repo . --root main --target deploy.yml
