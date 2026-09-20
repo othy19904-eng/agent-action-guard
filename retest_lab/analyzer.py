@@ -344,19 +344,35 @@ def _add_effect_edges_for_function_context(
 
             match = WORKFLOW_RUN_RE.search(cmd)
             if match:
-                graph.add(cursor, "effect:shell.exec", "invokes", evidence)
+                effect_node = f"effect:shell.exec@{context_node}"
+                graph.add(cursor, effect_node, "invokes", evidence)
                 graph.add(
-                    "effect:shell.exec",
+                    effect_node,
                     f"workflow:{Path(match.group(1)).name}",
                     "gh_workflow_dispatch",
                     evidence,
                 )
             elif GIT_PUSH_RE.search(cmd):
-                graph.add(cursor, "effect:git_push", "invokes", evidence)
+                effect_node = f"effect:git_push@{context_node}"
+                graph.add(cursor, effect_node, "invokes", evidence)
+                # A git push can trigger every modeled push workflow. Keeping
+                # the effect node contextual prevents unrelated callsites
+                # from borrowing one another's downstream edges.
+                for edge in list(graph.edges):
+                    if (
+                        edge.src == "effect:git_push"
+                        and edge.kind == "push_triggers_workflow"
+                    ):
+                        graph.add(
+                            effect_node,
+                            edge.dst,
+                            edge.kind,
+                            evidence,
+                        )
             elif not linked_script:
                 graph.add(
                     cursor,
-                    "effect:shell.exec:unknown",
+                    f"effect:shell.exec:unknown@{context_node}",
                     "invokes",
                     evidence,
                 )
