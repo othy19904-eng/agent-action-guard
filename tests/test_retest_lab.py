@@ -273,6 +273,37 @@ class RetestLabTests(unittest.TestCase):
             finding = find_counterexample(graph)
             self.assertEqual(finding.status, "COUNTEREXAMPLE_FOUND")
 
+    def test_static_fstring_workflow_name_is_resolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    def agent_fstring():
+                        action = "deploy"
+                        subprocess.run(
+                            ["gh", "workflow", "run", f"{action}.yml"],
+                            check=True,
+                        )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            paths = {(e.src, e.dst) for e in graph.edges}
+            self.assertIn(
+                ("effect:shell.exec", "workflow:deploy.yml"),
+                paths,
+            )
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
