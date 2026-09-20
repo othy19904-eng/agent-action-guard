@@ -447,6 +447,121 @@ class RetestLabTests(unittest.TestCase):
             finding = find_counterexample(graph)
             self.assertEqual(finding.status, "UNKNOWN")
 
+    def test_tuple_unpacking_loop_propagates_workflow(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    WORKFLOWS = [
+                        ("ci.yml", {}, "CI"),
+                        ("deploy.yml", {}, "Deploy"),
+                    ]
+
+                    def trigger(workflow_id, inputs, description):
+                        cmd = ["gh", "workflow", "run", workflow_id]
+                        subprocess.run(cmd, check=True)
+
+                    def agent_main():
+                        for workflow_id, inputs, description in WORKFLOWS:
+                            if trigger(workflow_id, inputs, description):
+                                pass
+                    """
+                ),
+                encoding="utf-8",
+            )
+            for name in ("ci.yml", "deploy.yml"):
+                (root / ".github/workflows" / name).write_text(
+                    "on:\n  workflow_dispatch:\n",
+                    encoding="utf-8",
+                )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_main"}
+            reachable = set()
+            queue = list(graph.roots)
+            while queue:
+                node = queue.pop(0)
+                if node in reachable:
+                    continue
+                reachable.add(node)
+                queue.extend(edge.dst for edge in graph.outgoing(node))
+            self.assertIn("workflow:deploy.yml", reachable)
+
+    def test_default_parameters_make_rest_path_certain(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import requests
+
+                    def dispatch(workflow, owner="acme", repository="demo"):
+                        url = (
+                            f"https://api.github.com/repos/{owner}/{repository}/"
+                            f"actions/workflows/{workflow}/dispatches"
+                        )
+                        requests.post(url)
+
+                    def agent_start():
+                        dispatch("deploy.yml")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_start"}
+            certain_edges = [
+                edge
+                for edge in graph.edges
+                if edge.dst == "workflow:deploy.yml" and edge.certain
+            ]
+            self.assertTrue(certain_edges)
+
+    def test_module_scope_script_execution_is_modeled(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "release.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import urllib.request
+
+                    if __name__ == "__main__":
+                        req = urllib.request.Request(
+                            "https://api.github.com/repos/acme/demo/actions/"
+                            "workflows/release.yml/dispatches",
+                            method="POST",
+                        )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/release.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            reachable = set()
+            queue = ["module:release.py"]
+            while queue:
+                node = queue.pop(0)
+                if node in reachable:
+                    continue
+                reachable.add(node)
+                queue.extend(edge.dst for edge in graph.outgoing(node))
+            self.assertIn("workflow:release.yml", reachable)
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
