@@ -1,8 +1,90 @@
-# agent-action-guard
+# Consequence Boundary Completeness
 
-agent-action-guard is a deterministic local policy gate for proposed
-AI-agent actions: it evaluates one action proposal against one policy
-document and emits one canonical JSON decision record.
+**Find paths that bypass your AI agent safety controls.**
+
+You added an approval before production. This scanner checks whether another
+modeled path can reach the same production consequence without crossing the
+boundary you expected.
+
+```text
+EXPECTED
+
+AI agent
+  -> approval:P
+  -> production deploy                         ✅
+```
+
+```text
+COUNTEREXAMPLE
+
+AI agent
+  -> shell
+  -> gh workflow run deploy.yml
+  -> production deploy                         ❌
+
+Missing boundary: approval:P
+```
+
+## 30-second first run
+
+Install from a checkout of this repository:
+
+```sh
+python -m pip install .
+```
+
+Then check the production-deploy boundary already modeled by the MVP:
+
+```sh
+consequence-boundary . --consequence production_deploy --boundary P
+```
+
+When a certain bypass path exists, the command reports
+`COUNTEREXAMPLE_FOUND`, returns the path plus source evidence, and exits
+with code `1` so the same check can become a CI gate.
+
+Example shape:
+
+```json
+{
+  "status": "COUNTEREXAMPLE_FOUND",
+  "consequence": "production_deploy",
+  "expected_boundary": "P",
+  "path": [
+    "root:agent",
+    "effect:shell.exec",
+    "workflow:deploy.yml",
+    "consequence:production_deploy"
+  ]
+}
+```
+
+**This is not another authorization engine.** It tests a different question:
+after you add an approval or policy boundary, is there another modeled route
+to the same real-world consequence that bypasses it?
+
+Current scope is deliberately narrow: Python + GitHub Actions consequence
+paths, with conservative outcomes. `COVERED_WITHIN_MODEL` is not a claim of
+repository-wide completeness, and `UNKNOWN` is never a safety guarantee.
+
+## Testing it on a real repository?
+
+Please open a GitHub issue and include only:
+
+- the returned status: `COUNTEREXAMPLE_FOUND`, `COVERED_WITHIN_MODEL`, or `UNKNOWN`;
+- whether the reported path was real or a false positive;
+- whether this check would be useful enough to keep in CI.
+
+Do not include private source code, credentials, or proprietary repository
+details.
+
+---
+
+## Existing policy evaluator
+
+The repository also contains `agent-action-guard`, a deterministic local
+policy gate for proposed AI-agent actions. It evaluates one action proposal
+against one policy document and emits one canonical JSON decision record.
 
 > **It evaluates proposals only. It never executes actions.**
 >
@@ -159,7 +241,27 @@ It answers a narrower question than the policy evaluator above:
 > From this repository entrypoint, can the current model trace a path to this
 > GitHub workflow consequence?
 
-Run it from the repository root:
+### First run
+
+Install the repository as a local CLI package:
+
+```sh
+python -m pip install .
+```
+
+Then check the existing consequence-boundary property:
+
+```sh
+consequence-boundary . --consequence production_deploy --boundary P
+```
+
+A proven bypass exits with code `1` and reports
+`COUNTEREXAMPLE_FOUND`, including the alternate path and its evidence.
+`COVERED_WITHIN_MODEL` is deliberately not a repository-wide safety
+guarantee.
+
+For lower-level root-to-target path tracing, the experimental path CLI
+remains available:
 
 ```sh
 python -m retest_lab scan --repo . --root main --target deploy.yml
@@ -242,4 +344,4 @@ contract — including golden-byte and shuffle-invariance checks.
   semantic change requires a superseding ADR.
 - No per-decision exit codes: exit status signals evaluation success
   only, never the verdict.
-- No packaging, external integrations, or services of any kind.
+- No hosted service, account system, billing, or remote execution.
