@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-action-guard"
+version = "0.1.0"
+description = "Deterministic AI-agent action policy gate with an experimental consequence-boundary completeness scanner."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+agent-action-guard = "agent_action_guard.cli:main"
+consequence-boundary = "retest_lab.analyzer:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_action_guard*", "retest_lab*"]
