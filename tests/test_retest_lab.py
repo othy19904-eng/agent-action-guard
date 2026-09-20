@@ -35,6 +35,23 @@ class RetestLabTests(unittest.TestCase):
             ),
         )
 
+    def test_discovers_cross_file_shell_script_bypass(self):
+        graph = build_graph(FIXTURE)
+        graph.roots = {"function:agent_external_script_bypass"}
+        from retest_lab.analyzer import find_counterexample
+
+        finding = find_counterexample(graph)
+        self.assertEqual(finding.status, "COUNTEREXAMPLE_FOUND")
+        self.assertEqual(
+            finding.path,
+            (
+                "function:agent_external_script_bypass",
+                "script:scripts/deploy.sh",
+                "workflow:deploy.yml",
+                "consequence:production_deploy",
+            ),
+        )
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
