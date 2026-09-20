@@ -1086,19 +1086,25 @@ def find_counterexample(
     if target not in graph.consequences:
         return Finding("UNKNOWN", property_name, consequence, required_boundary)
 
-    queue: list[tuple[str, bool, tuple[str, ...], tuple[str, ...]]] = []
+    queue: list[
+        tuple[str, bool, bool, tuple[str, ...], tuple[str, ...]]
+    ] = []
     for root in sorted(graph.roots):
-        queue.append((root, root == boundary, (root,), ()))
-    seen: set[tuple[str, bool]] = set()
+        queue.append((root, root == boundary, True, (root,), ()))
+    seen: set[tuple[str, bool, bool]] = set()
     saw_target_via_boundary = False
+    saw_uncertain_target = False
 
     while queue:
-        node, crossed, path, evidence = queue.pop(0)
-        state = (node, crossed)
+        node, crossed, path_certain, path, evidence = queue.pop(0)
+        state = (node, crossed, path_certain)
         if state in seen:
             continue
         seen.add(state)
         if node == target:
+            if not path_certain:
+                saw_uncertain_target = True
+                continue
             if crossed:
                 saw_target_via_boundary = True
                 continue
@@ -1113,9 +1119,17 @@ def find_counterexample(
         for edge in graph.outgoing(node):
             nxt_crossed = crossed or edge.dst == boundary
             queue.append(
-                (edge.dst, nxt_crossed, path + (edge.dst,), evidence + (edge.evidence,))
+                (
+                    edge.dst,
+                    nxt_crossed,
+                    path_certain and edge.certain,
+                    path + (edge.dst,),
+                    evidence + (edge.evidence,),
+                )
             )
 
+    if saw_uncertain_target:
+        return Finding("UNKNOWN", property_name, consequence, required_boundary)
     if saw_target_via_boundary:
         return Finding("COVERED_WITHIN_MODEL", property_name, consequence, required_boundary)
     return Finding("UNKNOWN", property_name, consequence, required_boundary)
