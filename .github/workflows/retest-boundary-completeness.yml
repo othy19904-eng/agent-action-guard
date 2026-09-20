@@ -14,6 +14,21 @@ jobs:
       - name: Run analyzer and CLI tests
         run: |
           python -m unittest tests.test_retest_lab tests.test_retest_cli -v
-      - name: Smoke test public CLI
+      - name: Smoke test path-tracing CLI
         run: |
-          python -m retest_lab scan             --repo fixtures             --root agent_shell_bypass             --target deploy.yml
+          python -m retest_lab scan \
+            --repo fixtures \
+            --root agent_shell_bypass \
+            --target deploy.yml
+      - name: Install product CLI
+        run: python -m pip install .
+      - name: Smoke test consequence-boundary first run
+        shell: bash
+        run: |
+          set +e
+          output="$(consequence-boundary fixtures --consequence production_deploy --boundary P)"
+          code=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$code" -eq 1
+          grep -q '"status": "COUNTEREXAMPLE_FOUND"' <<<"$output"
