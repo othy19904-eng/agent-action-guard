@@ -92,6 +92,27 @@ def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
             values.append(value)
         return values if isinstance(node, ast.List) else tuple(values)
 
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value_node in node.values:
+            if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+                parts.append(value_node.value)
+                continue
+            if isinstance(value_node, ast.FormattedValue):
+                value = _static_value(value_node.value, env)
+                if value is None:
+                    return None
+                parts.append(str(value))
+                continue
+            return None
+        return "".join(parts)
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_value(node.left, env)
+        right = _static_value(node.right, env)
+        if isinstance(left, str) and isinstance(right, str):
+            return left + right
+
     return None
 
 
