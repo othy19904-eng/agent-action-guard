@@ -11,4 +11,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m unittest tests.test_retest_lab -v
+      - name: Run analyzer and CLI tests
+        run: |
+          python -m unittest tests.test_retest_lab tests.test_retest_cli -v
+      - name: Smoke test public CLI
+        run: |
+          python -m retest_lab scan             --repo fixtures             --root agent_shell_bypass             --target deploy.yml
