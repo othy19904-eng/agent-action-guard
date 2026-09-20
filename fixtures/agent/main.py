@@ -37,5 +37,9 @@ def trigger_prod():
     subprocess.run("gh workflow run deploy.yml", shell=True, check=True)
 
 
+def agent_external_script_bypass():
+    subprocess.run(["bash", "scripts/deploy.sh"], check=True)
+
+
 def fake_post(url: str):
     pass
