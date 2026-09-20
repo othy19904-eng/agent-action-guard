@@ -1,0 +1,30 @@
+name: RETEST real-world corpus
+
+on:
+  pull_request:
+    paths:
+      - "retest_lab/**"
+      - ".github/workflows/retest-real-world.yml"
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run pinned public-repository benchmark
+        run: |
+          python -m retest_lab.real_world_benchmark \
+            --json-out real-world-results.json \
+            --markdown-out real-world-summary.md
+          cat real-world-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-world-retest-results
+          path: |
+            real-world-results.json
+            real-world-summary.md

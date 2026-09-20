@@ -1,0 +1,19 @@
+name: RETEST consequence-boundary completeness
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run analyzer and CLI tests
+        run: |
+          python -m unittest tests.test_retest_lab tests.test_retest_cli -v
+      - name: Smoke test public CLI
+        run: |
+          python -m retest_lab scan             --repo fixtures             --root agent_shell_bypass             --target deploy.yml
