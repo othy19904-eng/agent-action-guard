@@ -3,12 +3,13 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 BOUNDARY_CALLS = {"require_approval", "approval"}
-WORKFLOW_RUN_RE = re.compile(r"gh\s+workflow\s+run\s+([^\s]+)")
+WORKFLOW_RUN_RE = re.compile(r"gh\s+workflow\s+run\s+([^\s;&|]+)")
 GIT_PUSH_RE = re.compile(r"\bgit\s+push\b")
 REST_DISPATCH_RE = re.compile(r"/actions/workflows/([^/\"']+)/dispatches")
 
@@ -109,6 +110,67 @@ def _workflow_triggers_and_prod(path: Path) -> tuple[set[str], bool]:
     return triggers, prod
 
 
+def _script_refs(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return []
+
+    refs: list[str] = []
+    for index, token in enumerate(tokens):
+        candidate: str | None = None
+        if token in {"bash", "sh"} and index + 1 < len(tokens):
+            nxt = tokens[index + 1]
+            if nxt.endswith(".sh"):
+                candidate = nxt
+        elif token.endswith(".sh") and (token.startswith("./") or "/" in token):
+            candidate = token
+
+        if candidate:
+            candidate = candidate.removeprefix("./")
+            if candidate not in refs:
+                refs.append(candidate)
+    return refs
+
+
+def _add_shell_script_edges(repo: Path, graph: Graph) -> None:
+    scripts: dict[str, Path] = {}
+    for script in sorted(repo.rglob("*.sh")):
+        if ".git" in script.parts:
+            continue
+        rel = script.relative_to(repo).as_posix()
+        scripts[rel] = script
+
+    for rel, script in scripts.items():
+        node = f"script:{rel}"
+        try:
+            lines = script.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+
+        for lineno, raw_line in enumerate(lines, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            evidence = f"{rel}:{lineno}"
+
+            match = WORKFLOW_RUN_RE.search(line)
+            if match:
+                graph.add(
+                    node,
+                    f"workflow:{Path(match.group(1)).name}",
+                    "gh_workflow_dispatch",
+                    evidence,
+                )
+
+            if GIT_PUSH_RE.search(line):
+                graph.add(node, "effect:git_push", "invokes", evidence)
+
+            for ref in _script_refs(line):
+                if ref in scripts:
+                    graph.add(node, f"script:{ref}", "calls_script", evidence)
+
+
 def build_graph(repo: str | Path) -> Graph:
     repo = Path(repo)
     graph = Graph()
@@ -121,8 +183,15 @@ def build_graph(repo: str | Path) -> Graph:
             workflows[wf.name] = (triggers, prod, wf)
             node = f"workflow:{wf.name}"
             if prod:
-                graph.add(node, "consequence:production_deploy", "reaches_consequence", str(wf.relative_to(repo)))
+                graph.add(
+                    node,
+                    "consequence:production_deploy",
+                    "reaches_consequence",
+                    str(wf.relative_to(repo)),
+                )
                 graph.consequences.add("consequence:production_deploy")
+
+    _add_shell_script_edges(repo, graph)
 
     function_names: set[str] = set()
     parsed: list[tuple[Path, ast.Module]] = []
@@ -168,7 +237,12 @@ def build_graph(repo: str | Path) -> Graph:
                 if name.endswith("run_workflow") and call.args:
                     wf = _literal_text(call.args[0])
                     if wf:
-                        graph.add(cursor, f"workflow:{Path(wf).name}", "mcp_workflow_dispatch", evidence)
+                        graph.add(
+                            cursor,
+                            f"workflow:{Path(wf).name}",
+                            "mcp_workflow_dispatch",
+                            evidence,
+                        )
                         continue
 
                 for arg in list(call.args) + [kw.value for kw in call.keywords]:
@@ -177,22 +251,59 @@ def build_graph(repo: str | Path) -> Graph:
                         continue
                     match = REST_DISPATCH_RE.search(text)
                     if match:
-                        graph.add(cursor, f"workflow:{Path(match.group(1)).name}", "rest_workflow_dispatch", evidence)
+                        graph.add(
+                            cursor,
+                            f"workflow:{Path(match.group(1)).name}",
+                            "rest_workflow_dispatch",
+                            evidence,
+                        )
 
-                if name in {"subprocess.run", "subprocess.call", "subprocess.check_call", "os.system"} and call.args:
+                if name in {
+                    "subprocess.run",
+                    "subprocess.call",
+                    "subprocess.check_call",
+                    "os.system",
+                } and call.args:
                     cmd = _literal_text(call.args[0])
                     if not cmd:
                         continue
+
+                    linked_script = False
+                    for ref in _script_refs(cmd):
+                        script = repo / ref
+                        if script.is_file():
+                            graph.add(
+                                cursor,
+                                f"script:{Path(ref).as_posix()}",
+                                "invokes_script",
+                                evidence,
+                            )
+                            linked_script = True
+
                     match = WORKFLOW_RUN_RE.search(cmd)
                     if match:
                         graph.add(cursor, "effect:shell.exec", "invokes", evidence)
-                        graph.add("effect:shell.exec", f"workflow:{Path(match.group(1)).name}", "gh_workflow_dispatch", evidence)
+                        graph.add(
+                            "effect:shell.exec",
+                            f"workflow:{Path(match.group(1)).name}",
+                            "gh_workflow_dispatch",
+                            evidence,
+                        )
                     elif GIT_PUSH_RE.search(cmd):
                         graph.add(cursor, "effect:git_push", "invokes", evidence)
+                    elif not linked_script:
+                        # The shell execution exists, but this RETEST model cannot
+                        # yet resolve its effect to a protected consequence.
+                        graph.add(cursor, "effect:shell.exec:unknown", "invokes", evidence)
 
     for wf_name, (triggers, _prod, wf_path) in workflows.items():
         if "push" in triggers:
-            graph.add("effect:git_push", f"workflow:{wf_name}", "push_triggers_workflow", str(wf_path.relative_to(repo)))
+            graph.add(
+                "effect:git_push",
+                f"workflow:{wf_name}",
+                "push_triggers_workflow",
+                str(wf_path.relative_to(repo)),
+            )
 
     return graph
 
