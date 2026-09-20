@@ -105,21 +105,32 @@ def checkout_case(case: Case, target: Path) -> None:
     _run("git", "checkout", "-q", "FETCH_HEAD", cwd=target)
 
 
-def find_path(graph: Graph, root: str, target: str) -> tuple[str, ...] | None:
-    queue: list[tuple[str, tuple[str, ...]]] = [(root, (root,))]
-    seen: set[str] = set()
+def find_path(
+    graph: Graph,
+    root: str,
+    target: str,
+) -> tuple[tuple[str, ...], bool] | None:
+    queue: list[tuple[str, bool, tuple[str, ...]]] = [(root, True, (root,))]
+    seen: set[tuple[str, bool]] = set()
 
     while queue:
-        node, path = queue.pop(0)
-        if node in seen:
+        node, certain, path = queue.pop(0)
+        state = (node, certain)
+        if state in seen:
             continue
-        seen.add(node)
+        seen.add(state)
 
         if node == target:
-            return path
+            return path, certain
 
         for edge in graph.outgoing(node):
-            queue.append((edge.dst, path + (edge.dst,)))
+            queue.append(
+                (
+                    edge.dst,
+                    certain and edge.certain,
+                    path + (edge.dst,),
+                )
+            )
 
     return None
 
@@ -128,8 +139,16 @@ def run_case(case: Case, workspace: Path) -> dict:
     repo_dir = workspace / case.name
     checkout_case(case, repo_dir)
     graph = build_graph(repo_dir)
-    path = find_path(graph, case.root, case.target)
-    observed = "FOUND" if path else "MISSED"
+    found = find_path(graph, case.root, case.target)
+    path = found[0] if found else ()
+    path_certain = found[1] if found else False
+    observed = (
+        "FOUND"
+        if found and path_certain
+        else "POSSIBLE"
+        if found
+        else "MISSED"
+    )
     expectation_met = (
         observed == "FOUND"
         if case.baseline_expectation == "FOUND"
@@ -146,19 +165,22 @@ def run_case(case: Case, workspace: Path) -> dict:
         "baseline_expectation": case.baseline_expectation,
         "observed": observed,
         "expectation_met": expectation_met,
-        "path": list(path or ()),
+        "path": list(path),
+        "path_certain": path_certain,
         "edge_count": len(graph.edges),
     }
 
 
 def markdown(results: list[dict]) -> str:
     found = sum(r["observed"] == "FOUND" for r in results)
+    possible = sum(r["observed"] == "POSSIBLE" for r in results)
     missed = sum(r["observed"] == "MISSED" for r in results)
     lines = [
         "# Consequence Boundary Completeness - real-world RETEST",
         "",
         f"Corpus: {len(results)} pinned public repositories",
-        f"Paths found: {found}",
+        f"Paths found (certain): {found}",
+        f"Paths possible (uncertain): {possible}",
         f"Paths missed: {missed}",
         "",
         "| Case | Repository | Mechanism | Baseline | Observed |",
@@ -222,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "corpus_size": len(results),
         "found": sum(r["observed"] == "FOUND" for r in results),
+        "possible": sum(r["observed"] == "POSSIBLE" for r in results),
         "missed": sum(r["observed"] == "MISSED" for r in results),
         "errors": sum(r["observed"] == "ERROR" for r in results),
         "results": results,
