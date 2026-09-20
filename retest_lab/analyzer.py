@@ -1104,6 +1104,58 @@ def build_graph(repo: str | Path) -> Graph:
                     function_names=function_names,
                 )
 
+    # Model explicit script execution as a separate root. This does not claim
+    # modules execute automatically: the node "module:<path>" means the file is
+    # executed as a script, so __name__ == "__main__" is true.
+    for py, tree in parsed:
+        rel = py.relative_to(repo)
+        module_body = [
+            stmt
+            for stmt in tree.body
+            if not isinstance(
+                stmt,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                    ast.Import,
+                    ast.ImportFrom,
+                ),
+            )
+        ]
+        if not module_body:
+            continue
+
+        pseudo = ast.FunctionDef(
+            name="__module_scope__",
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[],
+                vararg=None,
+                kwonlyargs=[],
+                kw_defaults=[],
+                kwarg=None,
+                defaults=[],
+            ),
+            body=module_body,
+            decorator_list=[],
+            returns=None,
+            type_comment=None,
+        )
+        module_node = f"module:{rel.as_posix()}"
+        _add_effect_edges_for_function_context(
+            repo=repo,
+            graph=graph,
+            rel=rel,
+            func=pseudo,
+            context_node=module_node,
+            initial_env=_merge_envs(
+                module_envs.get(py),
+                {"__name__": "__main__"},
+            ),
+            function_names=function_names,
+        )
+
     for wf_name, (triggers, _prod, wf_path) in workflows.items():
         if "push" in triggers:
             graph.add(
