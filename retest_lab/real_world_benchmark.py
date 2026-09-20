@@ -163,6 +163,53 @@ CASES = (
         mechanism="literal helper arg + default owner/repository -> requests.post REST dispatch",
         expected="FOUND",
     ),
+
+    # Third-wave cases: additional repositories and transport/path shapes.
+    Case(
+        name="pudl-shell-dispatch",
+        repository="catalyst-cooperative/pudl",
+        commit="ebd0281a7d74160af7eb299a4c96f8f2cf3d1e9f",
+        root="script:builds/pudl_batch.sh",
+        target="workflow:deploy-pudl.yml",
+        mechanism="shell gh workflow run with environment-driven flags",
+        expected="FOUND",
+    ),
+    Case(
+        name="pudl-negative-zip-helper",
+        repository="catalyst-cooperative/pudl",
+        commit="ebd0281a7d74160af7eb299a4c96f8f2cf3d1e9f",
+        root="function:_zip_parquet_files",
+        target="workflow:deploy-pudl.yml",
+        mechanism="local archive helper with no workflow dispatch",
+        expected="MISSED",
+    ),
+    Case(
+        name="mc-san-dynamic-rest-dispatch",
+        repository="retiredroca/mc-storage-area-network",
+        commit="ab62e4da8f00c9076ce5c5bbc6daa4c57d3d4e08",
+        root="function:dispatch_publish_ci",
+        target="workflow:publish-release.yml",
+        mechanism="dynamic repo_slug plus static workflow in urllib REST URL",
+        expected="FOUND",
+    ),
+    Case(
+        name="mc-san-negative-token",
+        repository="retiredroca/mc-storage-area-network",
+        commit="ab62e4da8f00c9076ce5c5bbc6daa4c57d3d4e08",
+        root="function:github_token",
+        target="workflow:publish-release.yml",
+        mechanism="credential resolution helper without dispatch",
+        expected="MISSED",
+    ),
+    Case(
+        name="electron-riscv-main-dispatch",
+        repository="riscv-forks/electron-riscv-releases",
+        commit="5a16498f6e87b9d85aba9fb30888b7ea2c0f4ad2",
+        root="function:main",
+        target="workflow:release.yml",
+        mechanism="environment defaults -> planning loop -> REST helper dispatch",
+        expected="FOUND",
+    ),
 )
 
 
