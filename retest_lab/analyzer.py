@@ -429,19 +429,21 @@ def _iter_reachable_calls(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     initial: dict[str, object] | None = None,
     function_returns: dict[str, dict[str, object]] | None = None,
-) -> Iterable[tuple[ast.Call, dict[str, object]]]:
-    """Yield calls only from statically reachable straight-line paths.
+) -> Iterable[tuple[ast.Call, dict[str, object], bool]]:
+    """Yield calls with bounded static environment and reachability certainty.
 
-    Known boolean branches are followed precisely. Unknown branches are not
-    guessed: bindings written inside them are invalidated and nested calls are
-    omitted from this bounded model.
+    Calls on statically-known control-flow paths are certain. Calls inside
+    runtime-dependent branches or loops are still modeled, but marked uncertain.
+    This lets the graph preserve possible consequence paths without upgrading
+    them to proven counterexamples.
     """
     env: dict[str, object] = dict(initial or {})
 
     def walk_block(
         statements: list[ast.stmt],
         current: dict[str, object],
-    ) -> Iterable[tuple[ast.Call, dict[str, object]]]:
+        path_certain: bool,
+    ) -> Iterable[tuple[ast.Call, dict[str, object], bool]]:
         for stmt in statements:
             if isinstance(stmt, ast.For):
                 iterable = _static_value(stmt.iter, current)
@@ -452,9 +454,28 @@ def _iter_reachable_calls(
                         if not _bind_loop_target(stmt.target, item, loop_env):
                             bound_all = False
                             break
-                        yield from walk_block(stmt.body, loop_env)
+                        yield from walk_block(
+                            stmt.body,
+                            loop_env,
+                            path_certain,
+                        )
                     if bound_all:
+                        if stmt.orelse:
+                            else_env = dict(current)
+                            yield from walk_block(
+                                stmt.orelse,
+                                else_env,
+                                path_certain,
+                            )
                         continue
+
+                # Runtime-dependent iterable: the loop body may execute zero or
+                # more times, so calls inside it are possible rather than proven.
+                loop_env = dict(current)
+                yield from walk_block(stmt.body, loop_env, False)
+                if stmt.orelse:
+                    else_env = dict(current)
+                    yield from walk_block(stmt.orelse, else_env, False)
                 for name in _assigned_names(stmt.body + stmt.orelse):
                     current.pop(name, None)
                 continue
@@ -471,20 +492,32 @@ def _iter_reachable_calls(
                     )
                 )
                 for call in test_calls:
-                    yield call, dict(current)
+                    yield call, dict(current), path_certain
 
                 decision = _static_bool(stmt.test, current)
                 if decision is True:
                     branch_env = dict(current)
-                    yield from walk_block(stmt.body, branch_env)
+                    yield from walk_block(
+                        stmt.body,
+                        branch_env,
+                        path_certain,
+                    )
                     current.clear()
                     current.update(branch_env)
                 elif decision is False:
                     branch_env = dict(current)
-                    yield from walk_block(stmt.orelse, branch_env)
+                    yield from walk_block(
+                        stmt.orelse,
+                        branch_env,
+                        path_certain,
+                    )
                     current.clear()
                     current.update(branch_env)
                 else:
+                    body_env = dict(current)
+                    else_env = dict(current)
+                    yield from walk_block(stmt.body, body_env, False)
+                    yield from walk_block(stmt.orelse, else_env, False)
                     for name in _assigned_names(stmt.body + stmt.orelse):
                         current.pop(name, None)
                 continue
@@ -501,11 +534,11 @@ def _iter_reachable_calls(
                 )
             )
             for call in calls:
-                yield call, dict(current)
+                yield call, dict(current), path_certain
 
             _apply_static_statement(stmt, current, function_returns)
 
-    yield from walk_block(func.body, env)
+    yield from walk_block(func.body, env, True)
 
 
 def _iter_calls_in_order(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterable[ast.Call]:
@@ -634,7 +667,7 @@ def _add_effect_edges_for_function_context(
     """
     cursor = context_node
 
-    for call, env in _iter_reachable_calls(func, initial_env):
+    for call, env, call_certain in _iter_reachable_calls(func, initial_env):
         name = _call_name(call) or ""
         evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
 
@@ -643,13 +676,25 @@ def _add_effect_edges_for_function_context(
             if label:
                 boundary = f"boundary:approval:{label}"
                 graph.boundaries.add(boundary)
-                graph.add(cursor, boundary, "crosses_boundary", evidence)
+                graph.add(
+                    cursor,
+                    boundary,
+                    "crosses_boundary",
+                    evidence,
+                    certain=call_certain,
+                )
                 cursor = boundary
                 continue
 
         short = name.split(".")[-1]
         if short in function_names and short != func.name:
-            graph.add(cursor, f"function:{short}", "calls", evidence)
+            graph.add(
+                cursor,
+                f"function:{short}",
+                "calls",
+                evidence,
+                certain=call_certain,
+            )
 
         if name.endswith("run_workflow") and call.args:
             wf = _literal_text(call.args[0], env)
@@ -659,6 +704,7 @@ def _add_effect_edges_for_function_context(
                     f"workflow:{Path(wf).name}",
                     "mcp_workflow_dispatch",
                     evidence,
+                    certain=call_certain,
                 )
                 continue
 
@@ -678,7 +724,7 @@ def _add_effect_edges_for_function_context(
                         else "possible_rest_workflow_dispatch"
                     ),
                     evidence,
-                    certain=certain,
+                    certain=call_certain and certain,
                 )
 
         if name in {
@@ -700,18 +746,26 @@ def _add_effect_edges_for_function_context(
                         f"script:{Path(ref).as_posix()}",
                         "invokes_script",
                         evidence,
+                        certain=call_certain,
                     )
                     linked_script = True
 
             match = WORKFLOW_RUN_RE.search(cmd)
             if match:
                 effect_node = f"effect:shell.exec@{context_node}"
-                graph.add(cursor, effect_node, "invokes", evidence)
+                graph.add(
+                    cursor,
+                    effect_node,
+                    "invokes",
+                    evidence,
+                    certain=call_certain,
+                )
                 graph.add(
                     effect_node,
                     f"workflow:{Path(match.group(1)).name}",
                     "gh_workflow_dispatch",
                     evidence,
+                    certain=call_certain,
                 )
             elif GIT_PUSH_RE.search(cmd):
                 effect_node = f"effect:git_push@{context_node}"
@@ -729,6 +783,7 @@ def _add_effect_edges_for_function_context(
                             edge.dst,
                             edge.kind,
                             evidence,
+                            certain=call_certain and edge.certain,
                         )
             elif not linked_script:
                 graph.add(
@@ -736,6 +791,7 @@ def _add_effect_edges_for_function_context(
                     f"effect:shell.exec:unknown@{context_node}",
                     "invokes",
                     evidence,
+                    certain=call_certain,
                 )
 
 
@@ -952,7 +1008,7 @@ def build_graph(repo: str | Path) -> Graph:
                 module_envs.get(py),
                 parameter_envs.get(func.name),
             )
-            for call, env in _iter_reachable_calls(
+            for call, env, call_certain in _iter_reachable_calls(
                 func,
                 initial_env,
                 function_returns,
@@ -965,13 +1021,25 @@ def build_graph(repo: str | Path) -> Graph:
                     if label:
                         boundary = f"boundary:approval:{label}"
                         graph.boundaries.add(boundary)
-                        graph.add(cursor, boundary, "crosses_boundary", evidence)
+                        graph.add(
+                            cursor,
+                            boundary,
+                            "crosses_boundary",
+                            evidence,
+                            certain=call_certain,
+                        )
                         cursor = boundary
                         continue
 
                 short = name.split(".")[-1]
                 if short in function_names and short != func.name:
-                    graph.add(cursor, f"function:{short}", "calls", evidence)
+                    graph.add(
+                        cursor,
+                        f"function:{short}",
+                        "calls",
+                        evidence,
+                        certain=call_certain,
+                    )
 
                 if name.endswith("run_workflow") and call.args:
                     wf = _literal_text(call.args[0], env)
@@ -981,6 +1049,7 @@ def build_graph(repo: str | Path) -> Graph:
                             f"workflow:{Path(wf).name}",
                             "mcp_workflow_dispatch",
                             evidence,
+                            certain=call_certain,
                         )
                         continue
 
@@ -1022,24 +1091,44 @@ def build_graph(repo: str | Path) -> Graph:
                                 f"script:{Path(ref).as_posix()}",
                                 "invokes_script",
                                 evidence,
+                                certain=call_certain,
                             )
                             linked_script = True
 
                     match = WORKFLOW_RUN_RE.search(cmd)
                     if match:
-                        graph.add(cursor, "effect:shell.exec", "invokes", evidence)
+                        graph.add(
+                            cursor,
+                            "effect:shell.exec",
+                            "invokes",
+                            evidence,
+                            certain=call_certain,
+                        )
                         graph.add(
                             "effect:shell.exec",
                             f"workflow:{Path(match.group(1)).name}",
                             "gh_workflow_dispatch",
                             evidence,
+                            certain=call_certain,
                         )
                     elif GIT_PUSH_RE.search(cmd):
-                        graph.add(cursor, "effect:git_push", "invokes", evidence)
+                        graph.add(
+                            cursor,
+                            "effect:git_push",
+                            "invokes",
+                            evidence,
+                            certain=call_certain,
+                        )
                     elif not linked_script:
                         # The shell execution exists, but this RETEST model cannot
                         # yet resolve its effect to a protected consequence.
-                        graph.add(cursor, "effect:shell.exec:unknown", "invokes", evidence)
+                        graph.add(
+                            cursor,
+                            "effect:shell.exec:unknown",
+                            "invokes",
+                            evidence,
+                            certain=call_certain,
+                        )
 
     # Supplement the global call graph with callsite-specific function
     # instances whenever a direct call supplies at least one static argument.
@@ -1056,7 +1145,7 @@ def build_graph(repo: str | Path) -> Graph:
             )
             caller_node = f"function:{caller.name}"
 
-            for call, call_env in _iter_reachable_calls(
+            for call, call_env, call_certain in _iter_reachable_calls(
                 caller,
                 caller_initial,
                 function_returns,
@@ -1090,6 +1179,7 @@ def build_graph(repo: str | Path) -> Graph:
                     context_node,
                     "calls_with_context",
                     evidence,
+                    certain=call_certain,
                 )
                 _add_effect_edges_for_function_context(
                     repo=repo,
