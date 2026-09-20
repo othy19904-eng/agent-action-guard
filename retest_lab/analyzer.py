@@ -74,9 +74,19 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
+def _expr_key(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
-        return env.get(node.id)
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _expr_key(node.value)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
+    key = _expr_key(node)
+    if key is not None and key in env:
+        return env[key]
 
     try:
         return ast.literal_eval(node)
@@ -163,6 +173,119 @@ def _command_text(
     return None
 
 
+def _argparse_dest(call: ast.Call, env: dict[str, object]) -> str | None:
+    if not call.args:
+        return None
+    options: list[str] = []
+    for arg in call.args:
+        value = _static_value(arg, env)
+        if isinstance(value, str):
+            options.append(value)
+    if not options:
+        return None
+    long_options = [opt for opt in options if opt.startswith("--")]
+    chosen = long_options[-1] if long_options else options[0]
+    return chosen.lstrip("-").replace("-", "_")
+
+
+def _apply_static_statement(stmt: ast.stmt, env: dict[str, object]) -> None:
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        call = stmt.value
+        name = _call_name(call) or ""
+        if name.endswith(".add_argument"):
+            parser_key = _expr_key(call.func.value) if isinstance(call.func, ast.Attribute) else None
+            dest = _argparse_dest(call, env)
+            if parser_key and dest:
+                default_value: object | None = None
+                choices_value: object | None = None
+                for kw in call.keywords:
+                    if kw.arg == "default":
+                        default_value = _static_value(kw.value, env)
+                    elif kw.arg == "choices":
+                        choices_value = _static_value(kw.value, env)
+                if choices_value is not None:
+                    env[f"__argparse__.{parser_key}.{dest}.choices"] = choices_value
+                if default_value is not None:
+                    env[f"__argparse__.{parser_key}.{dest}.default"] = default_value
+        return
+
+    if isinstance(stmt, ast.Assign):
+        # argparse Namespace assignment, e.g. args = parser.parse_args()
+        if (
+            isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Attribute)
+            and stmt.value.func.attr == "parse_args"
+        ):
+            parser_key = _expr_key(stmt.value.func.value)
+            for target in stmt.targets:
+                if not isinstance(target, ast.Name) or not parser_key:
+                    continue
+                prefix = f"__argparse__.{parser_key}."
+                specs: dict[str, dict[str, object]] = {}
+                for key, value in list(env.items()):
+                    if not key.startswith(prefix):
+                        continue
+                    rest = key[len(prefix):]
+                    if "." not in rest:
+                        continue
+                    dest, kind = rest.rsplit(".", 1)
+                    specs.setdefault(dest, {})[kind] = value
+                for dest, spec in specs.items():
+                    if "choices" in spec:
+                        env[f"{target.id}.{dest}"] = spec["choices"]
+                    elif "default" in spec:
+                        env[f"{target.id}.{dest}"] = spec["default"]
+            return
+
+        value = _static_value(stmt.value, env)
+        for target in stmt.targets:
+            if isinstance(target, ast.Name):
+                if value is None:
+                    env.pop(target.id, None)
+                else:
+                    env[target.id] = value
+        return
+
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        value = (
+            _static_value(stmt.value, env)
+            if stmt.value is not None
+            else None
+        )
+        if value is None:
+            env.pop(stmt.target.id, None)
+        else:
+            env[stmt.target.id] = value
+        return
+
+    if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+        env.pop(stmt.target.id, None)
+
+
+def _bindings_from_env(
+    call: ast.Call,
+    callee: ast.FunctionDef | ast.AsyncFunctionDef,
+    env: dict[str, object],
+) -> dict[str, object]:
+    params = _parameter_names(callee)
+    bindings: dict[str, object] = {}
+
+    for index, arg in enumerate(call.args):
+        if index >= len(params):
+            break
+        value = _static_value(arg, env)
+        if value is not None:
+            bindings[params[index]] = value
+
+    for kw in call.keywords:
+        if kw.arg in params:
+            value = _static_value(kw.value, env)
+            if value is not None:
+                bindings[kw.arg] = value
+
+    return bindings
+
+
 def _static_env_before(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     lineno: int,
@@ -180,26 +303,7 @@ def _static_env_before(
         if stmt_line >= lineno:
             break
 
-        if isinstance(stmt, ast.Assign):
-            value = _static_value(stmt.value, env)
-            for target in stmt.targets:
-                if isinstance(target, ast.Name):
-                    if value is None:
-                        env.pop(target.id, None)
-                    else:
-                        env[target.id] = value
-        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            value = (
-                _static_value(stmt.value, env)
-                if stmt.value is not None
-                else None
-            )
-            if value is None:
-                env.pop(stmt.target.id, None)
-            else:
-                env[stmt.target.id] = value
-        elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
-            env.pop(stmt.target.id, None)
+        _apply_static_statement(stmt, env)
 
     return env
 
@@ -256,6 +360,21 @@ def _iter_reachable_calls(
         current: dict[str, object],
     ) -> Iterable[tuple[ast.Call, dict[str, object]]]:
         for stmt in statements:
+            if isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
+                iterable = _static_value(stmt.iter, current)
+                if isinstance(iterable, (list, tuple)) and all(
+                    isinstance(item, (str, int, float, bool))
+                    for item in iterable
+                ):
+                    for item in iterable:
+                        loop_env = dict(current)
+                        loop_env[stmt.target.id] = item
+                        yield from walk_block(stmt.body, loop_env)
+                    continue
+                for name in _assigned_names(stmt.body + stmt.orelse):
+                    current.pop(name, None)
+                continue
+
             if isinstance(stmt, ast.If):
                 decision = _static_bool(stmt.test, current)
                 if decision is True:
@@ -287,32 +406,7 @@ def _iter_reachable_calls(
             for call in calls:
                 yield call, dict(current)
 
-            if isinstance(stmt, ast.Assign):
-                value = _static_value(stmt.value, current)
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        if value is None:
-                            current.pop(target.id, None)
-                        else:
-                            current[target.id] = value
-            elif (
-                isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
-            ):
-                value = (
-                    _static_value(stmt.value, current)
-                    if stmt.value is not None
-                    else None
-                )
-                if value is None:
-                    current.pop(stmt.target.id, None)
-                else:
-                    current[stmt.target.id] = value
-            elif (
-                isinstance(stmt, ast.AugAssign)
-                and isinstance(stmt.target, ast.Name)
-            ):
-                current.pop(stmt.target.id, None)
+            _apply_static_statement(stmt, current)
 
     yield from walk_block(func.body, env)
 
