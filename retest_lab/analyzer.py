@@ -107,6 +107,41 @@ def _literal_text(
     return None
 
 
+def _command_text(
+    node: ast.AST,
+    env: dict[str, object] | None = None,
+) -> str | None:
+    """Resolve enough of a shell argv to recognize a fixed effect prefix.
+
+    Unknown list elements are kept as placeholders instead of invalidating the
+    entire command. This is useful for commands such as:
+    ["gh", "workflow", "run", "deploy.yml", "--repo", repo]
+    where the consequence-bearing prefix is fully static but a trailing option
+    is dynamic.
+    """
+    env = env or {}
+    full = _literal_text(node, env)
+    if full is not None:
+        return full
+
+    if isinstance(node, (ast.List, ast.Tuple)):
+        tokens: list[str] = []
+        for element in node.elts:
+            value = _static_value(element, env)
+            tokens.append(value if isinstance(value, str) else "<UNKNOWN>")
+        return " ".join(tokens)
+
+    if isinstance(node, ast.Name):
+        value = env.get(node.id)
+        if isinstance(value, (list, tuple)):
+            return " ".join(
+                item if isinstance(item, str) else "<UNKNOWN>"
+                for item in value
+            )
+
+    return None
+
+
 def _static_env_before(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     lineno: int,
@@ -434,7 +469,7 @@ def _add_effect_edges_for_function_context(
             "subprocess.check_call",
             "os.system",
         } and call.args:
-            cmd = _literal_text(call.args[0], env)
+            cmd = _command_text(call.args[0], env)
             if not cmd:
                 continue
 
@@ -662,7 +697,7 @@ def build_graph(repo: str | Path) -> Graph:
                     "subprocess.check_call",
                     "os.system",
                 } and call.args:
-                    cmd = _literal_text(call.args[0], env)
+                    cmd = _command_text(call.args[0], env)
                     if not cmd:
                         continue
 
