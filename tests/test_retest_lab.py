@@ -304,6 +304,46 @@ class RetestLabTests(unittest.TestCase):
                 paths,
             )
 
+    def test_wrapper_with_module_constant_workflow_is_resolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    WORKFLOW = "image.yml"
+
+                    def run(args):
+                        return subprocess.run(args, check=False)
+
+                    def agent_wrapper():
+                        run(["gh", "workflow", "run", WORKFLOW])
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/image.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_wrapper"}
+            from retest_lab.analyzer import find_counterexample
+
+            path_nodes = set()
+            queue = list(graph.roots)
+            while queue:
+                node = queue.pop(0)
+                if node in path_nodes:
+                    continue
+                path_nodes.add(node)
+                queue.extend(edge.dst for edge in graph.outgoing(node))
+
+            self.assertIn("workflow:image.yml", path_nodes)
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
