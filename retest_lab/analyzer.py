@@ -335,6 +335,17 @@ def _bindings_from_env(
             if value is not None:
                 bindings[kw.arg] = value
 
+    defaults = list(callee.args.defaults)
+    if defaults:
+        first_default = len(params) - len(defaults)
+        for offset, default_node in enumerate(defaults):
+            param = params[first_default + offset]
+            if param in bindings:
+                continue
+            value = _static_value(default_node, env)
+            if value is not None:
+                bindings[param] = value
+
     return bindings
 
 
@@ -396,6 +407,24 @@ def _assigned_names(statements: list[ast.stmt]) -> set[str]:
     return names
 
 
+def _bind_loop_target(
+    target: ast.AST,
+    value: object,
+    env: dict[str, object],
+) -> bool:
+    if isinstance(target, ast.Name):
+        env[target.id] = value
+        return True
+    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (tuple, list)):
+        if len(target.elts) != len(value):
+            return False
+        for child, item in zip(target.elts, value):
+            if not _bind_loop_target(child, item, env):
+                return False
+        return True
+    return False
+
+
 def _iter_reachable_calls(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     initial: dict[str, object] | None = None,
@@ -414,22 +443,36 @@ def _iter_reachable_calls(
         current: dict[str, object],
     ) -> Iterable[tuple[ast.Call, dict[str, object]]]:
         for stmt in statements:
-            if isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
+            if isinstance(stmt, ast.For):
                 iterable = _static_value(stmt.iter, current)
-                if isinstance(iterable, (list, tuple)) and all(
-                    isinstance(item, (str, int, float, bool))
-                    for item in iterable
-                ):
+                if isinstance(iterable, (list, tuple)) and len(iterable) <= 64:
+                    bound_all = True
                     for item in iterable:
                         loop_env = dict(current)
-                        loop_env[stmt.target.id] = item
+                        if not _bind_loop_target(stmt.target, item, loop_env):
+                            bound_all = False
+                            break
                         yield from walk_block(stmt.body, loop_env)
-                    continue
+                    if bound_all:
+                        continue
                 for name in _assigned_names(stmt.body + stmt.orelse):
                     current.pop(name, None)
                 continue
 
             if isinstance(stmt, ast.If):
+                test_calls = [
+                    node for node in ast.walk(stmt.test)
+                    if isinstance(node, ast.Call)
+                ]
+                test_calls.sort(
+                    key=lambda node: (
+                        getattr(node, "lineno", 0),
+                        getattr(node, "col_offset", 0),
+                    )
+                )
+                for call in test_calls:
+                    yield call, dict(current)
+
                 decision = _static_bool(stmt.test, current)
                 if decision is True:
                     branch_env = dict(current)
