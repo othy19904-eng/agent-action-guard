@@ -20,6 +20,12 @@ class Edge:
     dst: str
     kind: str
     evidence: str
+    certain: bool = True
+
+
+@dataclass(frozen=True)
+class PartialText:
+    text: str
 
 
 @dataclass
@@ -29,8 +35,16 @@ class Graph:
     boundaries: set[str] = field(default_factory=set)
     consequences: set[str] = field(default_factory=set)
 
-    def add(self, src: str, dst: str, kind: str, evidence: str) -> None:
-        edge = Edge(src, dst, kind, evidence)
+    def add(
+        self,
+        src: str,
+        dst: str,
+        kind: str,
+        evidence: str,
+        *,
+        certain: bool = True,
+    ) -> None:
+        edge = Edge(src, dst, kind, evidence, certain)
         if edge not in self.edges:
             self.edges.append(edge)
 
@@ -104,24 +118,35 @@ def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
 
     if isinstance(node, ast.JoinedStr):
         parts: list[str] = []
+        certain = True
         for value_node in node.values:
             if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
                 parts.append(value_node.value)
                 continue
             if isinstance(value_node, ast.FormattedValue):
                 value = _static_value(value_node.value, env)
-                if value is None:
-                    return None
-                parts.append(str(value))
+                if isinstance(value, PartialText):
+                    parts.append(value.text)
+                    certain = False
+                elif value is None:
+                    parts.append("<UNKNOWN>")
+                    certain = False
+                else:
+                    parts.append(str(value))
                 continue
             return None
-        return "".join(parts)
+        text = "".join(parts)
+        return text if certain else PartialText(text)
 
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _static_value(node.left, env)
         right = _static_value(node.right, env)
         if isinstance(left, str) and isinstance(right, str):
             return left + right
+        if isinstance(left, (str, PartialText)) and isinstance(right, (str, PartialText)):
+            left_text = left.text if isinstance(left, PartialText) else left
+            right_text = right.text if isinstance(right, PartialText) else right
+            return PartialText(left_text + right_text)
 
     return None
 
@@ -135,6 +160,18 @@ def _literal_text(
         return value
     if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
         return " ".join(value)
+    return None
+
+
+def _effect_text(
+    node: ast.AST,
+    env: dict[str, object] | None = None,
+) -> tuple[str, bool] | None:
+    value = _static_value(node, env or {})
+    if isinstance(value, str):
+        return value, True
+    if isinstance(value, PartialText):
+        return value.text, False
     return None
 
 
@@ -583,16 +620,22 @@ def _add_effect_edges_for_function_context(
                 continue
 
         for arg in list(call.args) + [kw.value for kw in call.keywords]:
-            text = _literal_text(arg, env)
-            if not text:
+            resolved = _effect_text(arg, env)
+            if not resolved:
                 continue
+            text, certain = resolved
             match = REST_DISPATCH_RE.search(text)
             if match:
                 graph.add(
                     cursor,
                     f"workflow:{Path(match.group(1)).name}",
-                    "rest_workflow_dispatch",
+                    (
+                        "rest_workflow_dispatch"
+                        if certain
+                        else "possible_rest_workflow_dispatch"
+                    ),
                     evidence,
+                    certain=certain,
                 )
 
         if name in {
@@ -899,16 +942,22 @@ def build_graph(repo: str | Path) -> Graph:
                         continue
 
                 for arg in list(call.args) + [kw.value for kw in call.keywords]:
-                    text = _literal_text(arg, env)
-                    if not text:
+                    resolved = _effect_text(arg, env)
+                    if not resolved:
                         continue
+                    text, certain = resolved
                     match = REST_DISPATCH_RE.search(text)
                     if match:
                         graph.add(
                             cursor,
                             f"workflow:{Path(match.group(1)).name}",
-                            "rest_workflow_dispatch",
+                            (
+                                "rest_workflow_dispatch"
+                                if certain
+                                else "possible_rest_workflow_dispatch"
+                            ),
                             evidence,
+                            certain=certain,
                         )
 
                 if name in {
