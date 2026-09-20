@@ -900,25 +900,32 @@ def build_graph(repo: str | Path) -> Graph:
             )
             caller_node = f"function:{caller.name}"
 
-            for call in _iter_calls_in_order(caller):
+            for call, call_env in _iter_reachable_calls(
+                caller,
+                caller_initial,
+            ):
                 name = _call_name(call) or ""
                 callee_name = name.split(".")[-1]
                 callee = function_defs.get(callee_name)
                 if callee is None or callee_name == caller.name:
                     continue
 
-                bindings = _callsite_bindings(
-                    caller,
+                bindings = _bindings_from_env(
                     call,
                     callee,
-                    caller_initial,
+                    call_env,
                 )
                 if not bindings:
                     continue
 
                 line = getattr(call, "lineno", 0)
+                binding_label = ",".join(
+                    f"{key}={value!r}"
+                    for key, value in sorted(bindings.items())
+                )
                 context_node = (
                     f"context:{callee_name}@{caller.name}:{line}"
+                    f"[{binding_label}]"
                 )
                 evidence = f"{rel}:{line}"
                 graph.add(
