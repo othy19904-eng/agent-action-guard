@@ -102,6 +102,44 @@ def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
     if key is not None and key in env:
         return env[key]
 
+    if isinstance(node, ast.Call):
+        name = _call_name(node) or ""
+
+        # Environment defaults are candidates, not certainties: runtime state
+        # may override them. Preserve the candidate text as PartialText so it
+        # can participate in downstream URL construction without becoming a
+        # proven edge.
+        if name in {"os.getenv", "os.environ.get"} and len(node.args) >= 2:
+            default = _static_value(node.args[1], env)
+            if isinstance(default, str):
+                return PartialText(default)
+            if isinstance(default, PartialText):
+                return default
+
+        # Model a small set of pure string transforms used in URL/path
+        # construction. Uncertainty of the base string is preserved.
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {
+            "strip",
+            "lstrip",
+            "rstrip",
+            "removeprefix",
+            "removesuffix",
+        }:
+            base = _static_value(node.func.value, env)
+            if isinstance(base, (str, PartialText)):
+                base_text = base.text if isinstance(base, PartialText) else base
+                args: list[str] = []
+                for arg in node.args:
+                    value = _static_value(arg, env)
+                    if not isinstance(value, str):
+                        return None
+                    args.append(value)
+                try:
+                    result = getattr(base_text, node.func.attr)(*args)
+                except TypeError:
+                    return None
+                return PartialText(result) if isinstance(base, PartialText) else result
+
     try:
         return ast.literal_eval(node)
     except Exception:
@@ -769,7 +807,13 @@ def _add_effect_edges_for_function_context(
                 )
             elif GIT_PUSH_RE.search(cmd):
                 effect_node = f"effect:git_push@{context_node}"
-                graph.add(cursor, effect_node, "invokes", evidence)
+                graph.add(
+                    cursor,
+                    effect_node,
+                    "invokes",
+                    evidence,
+                    certain=call_certain,
+                )
                 # A git push can trigger every modeled push workflow. Keeping
                 # the effect node contextual prevents unrelated callsites
                 # from borrowing one another's downstream edges.
