@@ -48,5 +48,15 @@ def agent_dataflow_bypass():
     subprocess.run(cmd, check=True)
 
 
+def agent_interprocedural_bypass():
+    launch_workflow("deploy.yml")
+
+
+def launch_workflow(workflow):
+    executable = "gh"
+    cmd = [executable, "workflow", "run", workflow]
+    subprocess.run(cmd, check=True)
+
+
 def fake_post(url: str):
     pass
