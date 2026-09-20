@@ -69,6 +69,24 @@ class RetestLabTests(unittest.TestCase):
             ),
         )
 
+    def test_discovers_interprocedural_argument_flow_bypass(self):
+        graph = build_graph(FIXTURE)
+        graph.roots = {"function:agent_interprocedural_bypass"}
+        from retest_lab.analyzer import find_counterexample
+
+        finding = find_counterexample(graph)
+        self.assertEqual(finding.status, "COUNTEREXAMPLE_FOUND")
+        self.assertEqual(
+            finding.path,
+            (
+                "function:agent_interprocedural_bypass",
+                "function:launch_workflow",
+                "effect:shell.exec",
+                "workflow:deploy.yml",
+                "consequence:production_deploy",
+            ),
+        )
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
