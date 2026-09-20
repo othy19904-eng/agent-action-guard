@@ -136,6 +136,59 @@ class RetestLabTests(unittest.TestCase):
             staging = find_counterexample(graph)
             self.assertEqual(staging.status, "UNKNOWN")
 
+    def test_context_sensitive_constant_branches_are_respected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    def agent_prod():
+                        launch("deploy.yml", True)
+
+                    def agent_safe():
+                        launch("deploy.yml", False)
+
+                    def launch(workflow, allow_prod):
+                        if allow_prod:
+                            subprocess.run(
+                                ["gh", "workflow", "run", workflow],
+                                check=True,
+                            )
+                        else:
+                            print("dry-run only")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      deploy:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            from retest_lab.analyzer import find_counterexample
+
+            graph.roots = {"function:agent_prod"}
+            prod = find_counterexample(graph)
+            self.assertEqual(prod.status, "COUNTEREXAMPLE_FOUND")
+
+            graph.roots = {"function:agent_safe"}
+            safe = find_counterexample(graph)
+            self.assertEqual(safe.status, "UNKNOWN")
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
