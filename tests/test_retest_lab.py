@@ -399,6 +399,121 @@ class RetestLabTests(unittest.TestCase):
             self.assertIn("workflow:rebuild_rust.yml", reachable)
             self.assertIn("workflow:other.yml", reachable)
 
+    def test_runtime_loop_path_is_possible_not_counterexample(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    def load_plans():
+                        return []
+
+                    def dispatch():
+                        subprocess.run(
+                            ["gh", "workflow", "run", "deploy.yml"],
+                            check=True,
+                        )
+
+                    def agent_main():
+                        plans = load_plans()
+                        for plan in plans:
+                            dispatch()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      deploy:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_main"}
+
+            possible_calls = [
+                edge
+                for edge in graph.edges
+                if edge.src == "function:agent_main"
+                and edge.dst == "function:dispatch"
+                and not edge.certain
+            ]
+            self.assertTrue(possible_calls)
+
+            from retest_lab.analyzer import find_counterexample
+
+            finding = find_counterexample(graph)
+            self.assertEqual(finding.status, "UNKNOWN")
+
+    def test_runtime_branch_path_is_possible_not_counterexample(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    def enabled():
+                        return False
+
+                    def dispatch():
+                        subprocess.run(
+                            ["gh", "workflow", "run", "deploy.yml"],
+                            check=True,
+                        )
+
+                    def agent_main():
+                        if enabled():
+                            dispatch()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      deploy:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_main"}
+
+            possible_calls = [
+                edge
+                for edge in graph.edges
+                if edge.src == "function:agent_main"
+                and edge.dst == "function:dispatch"
+                and not edge.certain
+            ]
+            self.assertTrue(possible_calls)
+
+            from retest_lab.analyzer import find_counterexample
+
+            finding = find_counterexample(graph)
+            self.assertEqual(finding.status, "UNKNOWN")
+
     def test_partial_rest_path_stays_unknown_not_counterexample(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
