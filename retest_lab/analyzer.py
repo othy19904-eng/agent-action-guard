@@ -74,16 +74,77 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _literal_text(node: ast.AST) -> str | None:
+def _static_value(node: ast.AST, env: dict[str, object]) -> object | None:
+    if isinstance(node, ast.Name):
+        return env.get(node.id)
+
     try:
-        value = ast.literal_eval(node)
+        return ast.literal_eval(node)
     except Exception:
-        return None
+        pass
+
+    if isinstance(node, (ast.List, ast.Tuple)):
+        values: list[object] = []
+        for element in node.elts:
+            value = _static_value(element, env)
+            if value is None:
+                return None
+            values.append(value)
+        return values if isinstance(node, ast.List) else tuple(values)
+
+    return None
+
+
+def _literal_text(
+    node: ast.AST,
+    env: dict[str, object] | None = None,
+) -> str | None:
+    value = _static_value(node, env or {})
     if isinstance(value, str):
         return value
     if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
         return " ".join(value)
     return None
+
+
+def _static_env_before(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    lineno: int,
+) -> dict[str, object]:
+    """Resolve only straight-line local constants assigned before a call.
+
+    This deliberately ignores branch-dependent/nested assignments. Unknown
+    writes invalidate a previously known value instead of guessing.
+    """
+    env: dict[str, object] = {}
+
+    for stmt in func.body:
+        stmt_line = getattr(stmt, "lineno", 0)
+        if stmt_line >= lineno:
+            break
+
+        if isinstance(stmt, ast.Assign):
+            value = _static_value(stmt.value, env)
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    if value is None:
+                        env.pop(target.id, None)
+                    else:
+                        env[target.id] = value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            value = (
+                _static_value(stmt.value, env)
+                if stmt.value is not None
+                else None
+            )
+            if value is None:
+                env.pop(stmt.target.id, None)
+            else:
+                env[stmt.target.id] = value
+        elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+            env.pop(stmt.target.id, None)
+
+    return env
 
 
 def _iter_calls_in_order(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterable[ast.Call]:
@@ -220,9 +281,10 @@ def build_graph(repo: str | Path) -> Graph:
             for call in _iter_calls_in_order(func):
                 name = _call_name(call) or ""
                 evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
+                env = _static_env_before(func, getattr(call, "lineno", 0))
 
                 if name.split(".")[-1] in BOUNDARY_CALLS and call.args:
-                    label = _literal_text(call.args[0])
+                    label = _literal_text(call.args[0], env)
                     if label:
                         boundary = f"boundary:approval:{label}"
                         graph.boundaries.add(boundary)
@@ -235,7 +297,7 @@ def build_graph(repo: str | Path) -> Graph:
                     graph.add(cursor, f"function:{short}", "calls", evidence)
 
                 if name.endswith("run_workflow") and call.args:
-                    wf = _literal_text(call.args[0])
+                    wf = _literal_text(call.args[0], env)
                     if wf:
                         graph.add(
                             cursor,
@@ -246,7 +308,7 @@ def build_graph(repo: str | Path) -> Graph:
                         continue
 
                 for arg in list(call.args) + [kw.value for kw in call.keywords]:
-                    text = _literal_text(arg)
+                    text = _literal_text(arg, env)
                     if not text:
                         continue
                     match = REST_DISPATCH_RE.search(text)
@@ -264,7 +326,7 @@ def build_graph(repo: str | Path) -> Graph:
                     "subprocess.check_call",
                     "os.system",
                 } and call.args:
-                    cmd = _literal_text(call.args[0])
+                    cmd = _literal_text(call.args[0], env)
                     if not cmd:
                         continue
 
