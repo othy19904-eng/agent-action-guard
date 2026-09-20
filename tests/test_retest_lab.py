@@ -233,6 +233,46 @@ class RetestLabTests(unittest.TestCase):
             finding = find_counterexample(graph)
             self.assertEqual(finding.status, "UNKNOWN")
 
+    def test_dynamic_trailing_command_arg_keeps_static_workflow_prefix(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import subprocess
+
+                    def agent_dispatch(repo):
+                        subprocess.run(
+                            ["gh", "workflow", "run", "deploy.yml", "--repo", repo],
+                            check=True,
+                        )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      deploy:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_dispatch"}
+            from retest_lab.analyzer import find_counterexample
+
+            finding = find_counterexample(graph)
+            self.assertEqual(finding.status, "COUNTEREXAMPLE_FOUND")
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
