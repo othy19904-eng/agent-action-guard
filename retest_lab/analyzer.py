@@ -226,6 +226,142 @@ def _infer_parameter_envs(
     return resolved
 
 
+def _callsite_bindings(
+    caller: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.Call,
+    callee: ast.FunctionDef | ast.AsyncFunctionDef,
+    caller_initial: dict[str, object] | None = None,
+) -> dict[str, object]:
+    caller_env = _static_env_before(
+        caller,
+        getattr(call, "lineno", 0),
+        caller_initial,
+    )
+    params = _parameter_names(callee)
+    bindings: dict[str, object] = {}
+
+    for index, arg in enumerate(call.args):
+        if index >= len(params):
+            break
+        value = _static_value(arg, caller_env)
+        if value is not None:
+            bindings[params[index]] = value
+
+    for kw in call.keywords:
+        if kw.arg in params:
+            value = _static_value(kw.value, caller_env)
+            if value is not None:
+                bindings[kw.arg] = value
+
+    return bindings
+
+
+def _add_effect_edges_for_function_context(
+    *,
+    repo: Path,
+    graph: Graph,
+    rel: Path,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    context_node: str,
+    initial_env: dict[str, object],
+    function_names: set[str],
+) -> None:
+    """Add bounded, callsite-specific edges for one function body.
+
+    This supplements the global graph. It does not claim full context-sensitive
+    program analysis; it specializes only statically-known arguments at this
+    callsite.
+    """
+    cursor = context_node
+
+    for call in _iter_calls_in_order(func):
+        name = _call_name(call) or ""
+        evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
+        env = _static_env_before(
+            func,
+            getattr(call, "lineno", 0),
+            initial_env,
+        )
+
+        if name.split(".")[-1] in BOUNDARY_CALLS and call.args:
+            label = _literal_text(call.args[0], env)
+            if label:
+                boundary = f"boundary:approval:{label}"
+                graph.boundaries.add(boundary)
+                graph.add(cursor, boundary, "crosses_boundary", evidence)
+                cursor = boundary
+                continue
+
+        short = name.split(".")[-1]
+        if short in function_names and short != func.name:
+            graph.add(cursor, f"function:{short}", "calls", evidence)
+
+        if name.endswith("run_workflow") and call.args:
+            wf = _literal_text(call.args[0], env)
+            if wf:
+                graph.add(
+                    cursor,
+                    f"workflow:{Path(wf).name}",
+                    "mcp_workflow_dispatch",
+                    evidence,
+                )
+                continue
+
+        for arg in list(call.args) + [kw.value for kw in call.keywords]:
+            text = _literal_text(arg, env)
+            if not text:
+                continue
+            match = REST_DISPATCH_RE.search(text)
+            if match:
+                graph.add(
+                    cursor,
+                    f"workflow:{Path(match.group(1)).name}",
+                    "rest_workflow_dispatch",
+                    evidence,
+                )
+
+        if name in {
+            "subprocess.run",
+            "subprocess.call",
+            "subprocess.check_call",
+            "os.system",
+        } and call.args:
+            cmd = _literal_text(call.args[0], env)
+            if not cmd:
+                continue
+
+            linked_script = False
+            for ref in _script_refs(cmd):
+                script = repo / ref
+                if script.is_file():
+                    graph.add(
+                        cursor,
+                        f"script:{Path(ref).as_posix()}",
+                        "invokes_script",
+                        evidence,
+                    )
+                    linked_script = True
+
+            match = WORKFLOW_RUN_RE.search(cmd)
+            if match:
+                graph.add(cursor, "effect:shell.exec", "invokes", evidence)
+                graph.add(
+                    "effect:shell.exec",
+                    f"workflow:{Path(match.group(1)).name}",
+                    "gh_workflow_dispatch",
+                    evidence,
+                )
+            elif GIT_PUSH_RE.search(cmd):
+                graph.add(cursor, "effect:git_push", "invokes", evidence)
+            elif not linked_script:
+                graph.add(
+                    cursor,
+                    "effect:shell.exec:unknown",
+                    "invokes",
+                    evidence,
+                )
+
+
 def _workflow_triggers_and_prod(path: Path) -> tuple[set[str], bool]:
     text = path.read_text(encoding="utf-8")
     triggers: set[str] = set()
@@ -435,6 +571,55 @@ def build_graph(repo: str | Path) -> Graph:
                         # The shell execution exists, but this RETEST model cannot
                         # yet resolve its effect to a protected consequence.
                         graph.add(cursor, "effect:shell.exec:unknown", "invokes", evidence)
+
+    # Supplement the global call graph with callsite-specific function
+    # instances whenever a direct call supplies at least one static argument.
+    # This lets two callers of the same helper retain different bindings.
+    for py, tree in parsed:
+        rel = py.relative_to(repo)
+        for caller in tree.body:
+            if not isinstance(caller, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+
+            caller_initial = parameter_envs.get(caller.name)
+            caller_node = f"function:{caller.name}"
+
+            for call in _iter_calls_in_order(caller):
+                name = _call_name(call) or ""
+                callee_name = name.split(".")[-1]
+                callee = function_defs.get(callee_name)
+                if callee is None or callee_name == caller.name:
+                    continue
+
+                bindings = _callsite_bindings(
+                    caller,
+                    call,
+                    callee,
+                    caller_initial,
+                )
+                if not bindings:
+                    continue
+
+                line = getattr(call, "lineno", 0)
+                context_node = (
+                    f"context:{callee_name}@{caller.name}:{line}"
+                )
+                evidence = f"{rel}:{line}"
+                graph.add(
+                    caller_node,
+                    context_node,
+                    "calls_with_context",
+                    evidence,
+                )
+                _add_effect_edges_for_function_context(
+                    repo=repo,
+                    graph=graph,
+                    rel=rel,
+                    func=callee,
+                    context_node=context_node,
+                    initial_env=bindings,
+                    function_names=function_names,
+                )
 
     for wf_name, (triggers, _prod, wf_path) in workflows.items():
         if "push" in triggers:
