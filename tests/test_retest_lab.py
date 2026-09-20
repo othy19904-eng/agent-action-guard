@@ -399,6 +399,69 @@ class RetestLabTests(unittest.TestCase):
             self.assertIn("workflow:rebuild_rust.yml", reachable)
             self.assertIn("workflow:other.yml", reachable)
 
+    def test_environment_default_through_rest_helper_is_possible(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import os
+                    import urllib.request
+
+                    def github_request(repo, path):
+                        url = f"https://api.github.com/repos/{repo}/{path.lstrip('/')}"
+                        urllib.request.Request(url, method="POST")
+
+                    def dispatch(repo, workflow):
+                        github_request(
+                            repo,
+                            f"actions/workflows/{workflow}/dispatches",
+                        )
+
+                    def agent_main():
+                        repo = os.environ.get("REPO", "acme/demo")
+                        workflow = os.environ.get("WORKFLOW", "release.yml")
+                        plans = load_plans()
+                        for plan in plans:
+                            dispatch(repo, workflow)
+
+                    def load_plans():
+                        return []
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/release.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      release:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_main"}
+
+            possible_edges = [
+                edge
+                for edge in graph.edges
+                if edge.dst == "workflow:release.yml" and not edge.certain
+            ]
+            self.assertTrue(possible_edges)
+
+            from retest_lab.analyzer import find_counterexample
+
+            finding = find_counterexample(graph)
+            self.assertEqual(finding.status, "UNKNOWN")
+
     def test_runtime_loop_path_is_possible_not_counterexample(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
