@@ -344,6 +344,61 @@ class RetestLabTests(unittest.TestCase):
 
             self.assertIn("workflow:image.yml", path_nodes)
 
+    def test_argparse_choices_flow_through_loop_into_fstring(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import argparse
+                    import subprocess
+
+                    ACTIONS = ["rebuild_rust", "other"]
+
+                    def trigger(action):
+                        subprocess.run(
+                            ["gh", "workflow", "run", f"{action}.yml"],
+                            check=True,
+                        )
+
+                    def parse_args():
+                        parser = argparse.ArgumentParser()
+                        parser.add_argument("actions", choices=ACTIONS, nargs="*")
+                        return parser.parse_args()
+
+                    def agent_cli():
+                        args = parse_args()
+                        for action in args.actions:
+                            trigger(action)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/rebuild_rust.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/other.yml").write_text(
+                "on:\n  workflow_dispatch:\n",
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_cli"}
+
+            reachable = set()
+            queue = list(graph.roots)
+            while queue:
+                node = queue.pop(0)
+                if node in reachable:
+                    continue
+                reachable.add(node)
+                queue.extend(edge.dst for edge in graph.outgoing(node))
+
+            self.assertIn("workflow:rebuild_rust.yml", reachable)
+            self.assertIn("workflow:other.yml", reachable)
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
