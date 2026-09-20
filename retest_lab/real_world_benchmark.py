@@ -479,7 +479,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_out:
         Path(args.markdown_out).write_text(rendered + "\n", encoding="utf-8")
 
-    return 1 if m["errors"] else 0
+    # Acceptance gate for the pinned corpus:
+    # known-positive paths may be certain or POSSIBLE, but never MISSED;
+    # negative controls must remain MISSED.
+    gate_failed = bool(
+        m["errors"]
+        or m["missed_positive"]
+        or m["false_positive_certain"]
+        or m["false_positive_possible"]
+    )
+    return 1 if gate_failed else 0
 
 
 if __name__ == "__main__":
