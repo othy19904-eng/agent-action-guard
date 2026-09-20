@@ -148,6 +148,119 @@ def _static_env_before(
     return env
 
 
+def _static_bool(node: ast.AST, env: dict[str, object]) -> bool | None:
+    value = _static_value(node, env)
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = _static_bool(node.operand, env)
+        return None if inner is None else not inner
+
+    if (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and len(node.comparators) == 1
+    ):
+        left = _static_value(node.left, env)
+        right = _static_value(node.comparators[0], env)
+        if left is None or right is None:
+            return None
+        if isinstance(node.ops[0], ast.Eq):
+            return left == right
+        if isinstance(node.ops[0], ast.NotEq):
+            return left != right
+
+    return None
+
+
+def _assigned_names(statements: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for stmt in statements:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+    return names
+
+
+def _iter_reachable_calls(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    initial: dict[str, object] | None = None,
+) -> Iterable[tuple[ast.Call, dict[str, object]]]:
+    """Yield calls only from statically reachable straight-line paths.
+
+    Known boolean branches are followed precisely. Unknown branches are not
+    guessed: bindings written inside them are invalidated and nested calls are
+    omitted from this bounded model.
+    """
+    env: dict[str, object] = dict(initial or {})
+
+    def walk_block(
+        statements: list[ast.stmt],
+        current: dict[str, object],
+    ) -> Iterable[tuple[ast.Call, dict[str, object]]]:
+        for stmt in statements:
+            if isinstance(stmt, ast.If):
+                decision = _static_bool(stmt.test, current)
+                if decision is True:
+                    branch_env = dict(current)
+                    yield from walk_block(stmt.body, branch_env)
+                    current.clear()
+                    current.update(branch_env)
+                elif decision is False:
+                    branch_env = dict(current)
+                    yield from walk_block(stmt.orelse, branch_env)
+                    current.clear()
+                    current.update(branch_env)
+                else:
+                    for name in _assigned_names(stmt.body + stmt.orelse):
+                        current.pop(name, None)
+                continue
+
+            calls = [
+                node
+                for node in ast.walk(stmt)
+                if isinstance(node, ast.Call)
+            ]
+            calls.sort(
+                key=lambda node: (
+                    getattr(node, "lineno", 0),
+                    getattr(node, "col_offset", 0),
+                )
+            )
+            for call in calls:
+                yield call, dict(current)
+
+            if isinstance(stmt, ast.Assign):
+                value = _static_value(stmt.value, current)
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        if value is None:
+                            current.pop(target.id, None)
+                        else:
+                            current[target.id] = value
+            elif (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+            ):
+                value = (
+                    _static_value(stmt.value, current)
+                    if stmt.value is not None
+                    else None
+                )
+                if value is None:
+                    current.pop(stmt.target.id, None)
+                else:
+                    current[stmt.target.id] = value
+            elif (
+                isinstance(stmt, ast.AugAssign)
+                and isinstance(stmt.target, ast.Name)
+            ):
+                current.pop(stmt.target.id, None)
+
+    yield from walk_block(func.body, env)
+
+
 def _iter_calls_in_order(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterable[ast.Call]:
     calls: list[tuple[int, int, ast.Call]] = []
     for node in ast.walk(func):
@@ -274,14 +387,9 @@ def _add_effect_edges_for_function_context(
     """
     cursor = context_node
 
-    for call in _iter_calls_in_order(func):
+    for call, env in _iter_reachable_calls(func, initial_env):
         name = _call_name(call) or ""
         evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
-        env = _static_env_before(
-            func,
-            getattr(call, "lineno", 0),
-            initial_env,
-        )
 
         if name.split(".")[-1] in BOUNDARY_CALLS and call.args:
             label = _literal_text(call.args[0], env)
@@ -504,14 +612,12 @@ def build_graph(repo: str | Path) -> Graph:
                 graph.roots.add(fn_node)
 
             cursor = fn_node
-            for call in _iter_calls_in_order(func):
+            for call, env in _iter_reachable_calls(
+                func,
+                parameter_envs.get(func.name),
+            ):
                 name = _call_name(call) or ""
                 evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
-                env = _static_env_before(
-                    func,
-                    getattr(call, "lineno", 0),
-                    parameter_envs.get(func.name),
-                )
 
                 if name.split(".")[-1] in BOUNDARY_CALLS and call.args:
                     label = _literal_text(call.args[0], env)
