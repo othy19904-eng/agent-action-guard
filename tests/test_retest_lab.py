@@ -399,6 +399,54 @@ class RetestLabTests(unittest.TestCase):
             self.assertIn("workflow:rebuild_rust.yml", reachable)
             self.assertIn("workflow:other.yml", reachable)
 
+    def test_partial_rest_path_stays_unknown_not_counterexample(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "main.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import urllib.request
+
+                    def agent_rest(repo):
+                        workflow = "deploy.yml"
+                        url = (
+                            f"https://api.github.com/repos/{repo}/actions/"
+                            f"workflows/{workflow}/dispatches"
+                        )
+                        urllib.request.Request(url, method="POST")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/deploy.yml").write_text(
+                textwrap.dedent(
+                    """\
+                    on:
+                      workflow_dispatch:
+                    jobs:
+                      deploy:
+                        environment: production
+                        steps:
+                          - run: echo production_deploy
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            graph = build_graph(root)
+            graph.roots = {"function:agent_rest"}
+            from retest_lab.analyzer import find_counterexample
+
+            possible_edges = [
+                edge
+                for edge in graph.edges
+                if edge.dst == "workflow:deploy.yml" and not edge.certain
+            ]
+            self.assertTrue(possible_edges)
+            finding = find_counterexample(graph)
+            self.assertEqual(finding.status, "UNKNOWN")
+
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
         triples = {(e.src, e.dst, e.kind) for e in graph.edges}
