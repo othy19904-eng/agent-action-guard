@@ -210,6 +210,53 @@ CASES = (
         mechanism="environment defaults -> planning loop -> REST helper dispatch",
         expected="FOUND",
     ),
+
+    # Deeper entrypoints and paired controls.
+    Case(
+        name="pudl-python-zenodo-dispatch",
+        repository="catalyst-cooperative/pudl",
+        commit="ebd0281a7d74160af7eb299a4c96f8f2cf3d1e9f",
+        root="function:trigger_zenodo_release",
+        target="workflow:zenodo-data-release.yml",
+        mechanism="business helper -> generic REST dispatcher with static workflow",
+        expected="FOUND",
+    ),
+    Case(
+        name="pudl-negative-gcs-hold",
+        repository="catalyst-cooperative/pudl",
+        commit="ebd0281a7d74160af7eb299a4c96f8f2cf3d1e9f",
+        root="function:set_gcs_temporary_hold",
+        target="workflow:zenodo-data-release.yml",
+        mechanism="cloud storage mutation helper with no GitHub dispatch",
+        expected="MISSED",
+    ),
+    Case(
+        name="electron-riscv-negative-fetch-releases",
+        repository="riscv-forks/electron-riscv-releases",
+        commit="5a16498f6e87b9d85aba9fb30888b7ea2c0f4ad2",
+        root="function:fetch_stable_releases",
+        target="workflow:release.yml",
+        mechanism="read-only upstream release fetch",
+        expected="MISSED",
+    ),
+    Case(
+        name="mc-san-main-to-publish",
+        repository="retiredroca/mc-storage-area-network",
+        commit="ab62e4da8f00c9076ce5c5bbc6daa4c57d3d4e08",
+        root="function:main",
+        target="workflow:publish-release.yml",
+        mechanism="full release orchestration -> dynamic REST publish dispatch",
+        expected="FOUND",
+    ),
+    Case(
+        name="mc-san-negative-verify",
+        repository="retiredroca/mc-storage-area-network",
+        commit="ab62e4da8f00c9076ce5c5bbc6daa4c57d3d4e08",
+        root="function:verify",
+        target="workflow:publish-release.yml",
+        mechanism="local artifact verification with no workflow dispatch",
+        expected="MISSED",
+    ),
 )
 
 
