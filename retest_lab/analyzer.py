@@ -188,7 +188,11 @@ def _argparse_dest(call: ast.Call, env: dict[str, object]) -> str | None:
     return chosen.lstrip("-").replace("-", "_")
 
 
-def _apply_static_statement(stmt: ast.stmt, env: dict[str, object]) -> None:
+def _apply_static_statement(
+    stmt: ast.stmt,
+    env: dict[str, object],
+    function_returns: dict[str, dict[str, object]] | None = None,
+) -> None:
     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
         call = stmt.value
         name = _call_name(call) or ""
@@ -210,6 +214,17 @@ def _apply_static_statement(stmt: ast.stmt, env: dict[str, object]) -> None:
         return
 
     if isinstance(stmt, ast.Assign):
+        # Local helper returning a statically summarized namespace.
+        if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
+            summary = (function_returns or {}).get(stmt.value.func.id)
+            if summary is not None:
+                for target in stmt.targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    for attr, value in summary.items():
+                        env[f"{target.id}.{attr}"] = value
+                return
+
         # argparse Namespace assignment, e.g. args = parser.parse_args()
         if (
             isinstance(stmt.value, ast.Call)
@@ -290,6 +305,7 @@ def _static_env_before(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     lineno: int,
     initial: dict[str, object] | None = None,
+    function_returns: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Resolve only straight-line local constants assigned before a call.
 
@@ -303,7 +319,7 @@ def _static_env_before(
         if stmt_line >= lineno:
             break
 
-        _apply_static_statement(stmt, env)
+        _apply_static_statement(stmt, env, function_returns)
 
     return env
 
@@ -346,6 +362,7 @@ def _assigned_names(statements: list[ast.stmt]) -> set[str]:
 def _iter_reachable_calls(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     initial: dict[str, object] | None = None,
+    function_returns: dict[str, dict[str, object]] | None = None,
 ) -> Iterable[tuple[ast.Call, dict[str, object]]]:
     """Yield calls only from statically reachable straight-line paths.
 
@@ -406,7 +423,7 @@ def _iter_reachable_calls(
             for call in calls:
                 yield call, dict(current)
 
-            _apply_static_statement(stmt, current)
+            _apply_static_statement(stmt, current, function_returns)
 
     yield from walk_block(func.body, env)
 
@@ -712,6 +729,44 @@ def _add_shell_script_edges(repo: Path, graph: Graph) -> None:
                     graph.add(node, f"script:{ref}", "calls_script", evidence)
 
 
+def _argparse_return_summary(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    initial: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    env = dict(initial or {})
+    for stmt in func.body:
+        if isinstance(stmt, ast.Return):
+            value = stmt.value
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "parse_args"
+            ):
+                parser_key = _expr_key(value.func.value)
+                if not parser_key:
+                    return None
+                prefix = f"__argparse__.{parser_key}."
+                summary: dict[str, object] = {}
+                specs: dict[str, dict[str, object]] = {}
+                for key, item in env.items():
+                    if not key.startswith(prefix):
+                        continue
+                    rest = key[len(prefix):]
+                    if "." not in rest:
+                        continue
+                    dest, kind = rest.rsplit(".", 1)
+                    specs.setdefault(dest, {})[kind] = item
+                for dest, spec in specs.items():
+                    if "choices" in spec:
+                        summary[dest] = spec["choices"]
+                    elif "default" in spec:
+                        summary[dest] = spec["default"]
+                return summary or None
+            return None
+        _apply_static_statement(stmt, env)
+    return None
+
+
 def _module_static_env(tree: ast.Module) -> dict[str, object]:
     env: dict[str, object] = {}
     for stmt in tree.body:
@@ -788,6 +843,14 @@ def build_graph(repo: str | Path) -> Graph:
                 function_module_envs[node.name] = module_env
 
     parameter_envs = _infer_parameter_envs(parsed, function_defs)
+    function_returns: dict[str, dict[str, object]] = {}
+    for py, tree in parsed:
+        module_env = module_envs.get(py, {})
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                summary = _argparse_return_summary(node, module_env)
+                if summary:
+                    function_returns[node.name] = summary
 
     for py, tree in parsed:
         rel = py.relative_to(repo)
@@ -806,6 +869,7 @@ def build_graph(repo: str | Path) -> Graph:
             for call, env in _iter_reachable_calls(
                 func,
                 initial_env,
+                function_returns,
             ):
                 name = _call_name(call) or ""
                 evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
@@ -903,6 +967,7 @@ def build_graph(repo: str | Path) -> Graph:
             for call, call_env in _iter_reachable_calls(
                 caller,
                 caller_initial,
+                function_returns,
             ):
                 name = _call_name(call) or ""
                 callee_name = name.split(".")[-1]
