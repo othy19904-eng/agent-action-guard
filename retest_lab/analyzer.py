@@ -618,6 +618,38 @@ def _add_shell_script_edges(repo: Path, graph: Graph) -> None:
                     graph.add(node, f"script:{ref}", "calls_script", evidence)
 
 
+def _module_static_env(tree: ast.Module) -> dict[str, object]:
+    env: dict[str, object] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            value = _static_value(stmt.value, env)
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    if value is None:
+                        env.pop(target.id, None)
+                    else:
+                        env[target.id] = value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            value = (
+                _static_value(stmt.value, env)
+                if stmt.value is not None
+                else None
+            )
+            if value is None:
+                env.pop(stmt.target.id, None)
+            else:
+                env[stmt.target.id] = value
+    return env
+
+
+def _merge_envs(*envs: dict[str, object] | None) -> dict[str, object]:
+    merged: dict[str, object] = {}
+    for env in envs:
+        if env:
+            merged.update(env)
+    return merged
+
+
 def build_graph(repo: str | Path) -> Graph:
     repo = Path(repo)
     graph = Graph()
@@ -642,6 +674,8 @@ def build_graph(repo: str | Path) -> Graph:
 
     function_names: set[str] = set()
     function_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    function_module_envs: dict[str, dict[str, object]] = {}
+    module_envs: dict[Path, dict[str, object]] = {}
     parsed: list[tuple[Path, ast.Module]] = []
     for py in sorted(repo.rglob("*.py")):
         if ".git" in py.parts:
@@ -651,10 +685,13 @@ def build_graph(repo: str | Path) -> Graph:
         except (SyntaxError, UnicodeDecodeError):
             continue
         parsed.append((py, tree))
+        module_env = _module_static_env(tree)
+        module_envs[py] = module_env
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 function_names.add(node.name)
                 function_defs[node.name] = node
+                function_module_envs[node.name] = module_env
 
     parameter_envs = _infer_parameter_envs(parsed, function_defs)
 
@@ -668,9 +705,13 @@ def build_graph(repo: str | Path) -> Graph:
                 graph.roots.add(fn_node)
 
             cursor = fn_node
+            initial_env = _merge_envs(
+                module_envs.get(py),
+                parameter_envs.get(func.name),
+            )
             for call, env in _iter_reachable_calls(
                 func,
-                parameter_envs.get(func.name),
+                initial_env,
             ):
                 name = _call_name(call) or ""
                 evidence = f"{rel}:{getattr(call, 'lineno', '?')}"
@@ -759,7 +800,10 @@ def build_graph(repo: str | Path) -> Graph:
             if not isinstance(caller, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            caller_initial = parameter_envs.get(caller.name)
+            caller_initial = _merge_envs(
+                module_envs.get(py),
+                parameter_envs.get(caller.name),
+            )
             caller_node = f"function:{caller.name}"
 
             for call in _iter_calls_in_order(caller):
@@ -795,7 +839,10 @@ def build_graph(repo: str | Path) -> Graph:
                     rel=rel,
                     func=callee,
                     context_node=context_node,
-                    initial_env=bindings,
+                    initial_env=_merge_envs(
+                        function_module_envs.get(callee_name),
+                        bindings,
+                    ),
                     function_names=function_names,
                 )
 
