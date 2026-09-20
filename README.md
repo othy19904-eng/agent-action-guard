@@ -149,6 +149,72 @@ affects only `decision` and `decisive_reason`.
 On every non-zero exit, stdout is exactly empty; diagnostics go to
 stderr and their wording is not a stable contract.
 
+## Experimental consequence-path scanner
+
+This branch also contains the first usable MVP of the
+**Consequence Boundary Completeness** work.
+
+It answers a narrower question than the policy evaluator above:
+
+> From this repository entrypoint, can the current model trace a path to this
+> GitHub workflow consequence?
+
+Run it from the repository root:
+
+```sh
+python -m retest_lab scan --repo . --root main --target deploy.yml
+```
+
+The `function:` and `workflow:` prefixes are optional. The equivalent
+explicit form is:
+
+```sh
+python -m retest_lab scan \
+  --repo . \
+  --root function:main \
+  --target workflow:deploy.yml
+```
+
+Example output:
+
+```text
+PROVEN
+root:   function:main
+target: workflow:deploy.yml
+path:
+  function:main
+  -> effect:shell.exec  [invokes; certain; app.py:42]
+  -> workflow:deploy.yml  [gh_workflow_dispatch; certain; app.py:42]
+```
+
+Machine-readable output is available with `--json`:
+
+```sh
+python -m retest_lab scan \
+  --repo . \
+  --root main \
+  --target deploy.yml \
+  --json
+```
+
+The scanner returns one of three statuses:
+
+| Status | Meaning |
+|---|---|
+| `PROVEN` | A modeled path from the requested root to target exists and every edge on that path is supported as certain by the bounded extractor. |
+| `POSSIBLE` | A modeled path exists, but at least one edge depends on unresolved runtime state or incomplete static information. |
+| `UNKNOWN` | The current model did not find a path. This does **not** mean the path is impossible. |
+
+**Important:** `PROVEN` is a statement about the returned modeled path, not a
+claim that the repository has been analyzed completely. `POSSIBLE` must never
+be promoted to a proven bypass, and `UNKNOWN` must never be interpreted as a
+safety guarantee.
+
+The current pinned real-world acceptance corpus contains 25 cases:
+15 known-positive paths and 10 negative controls. The current gate requires
+zero missed positives and zero certain or possible false positives before CI
+passes.
+
 ## Development
 
 Run the full test suite from the repository root:
