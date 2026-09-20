@@ -87,7 +87,7 @@ class RetestLabTests(unittest.TestCase):
             ),
         )
 
-    def test_conflicting_callsites_do_not_guess_parameter_value(self):
+    def test_context_sensitive_callsites_are_kept_separate(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / ".github/workflows").mkdir(parents=True)
@@ -99,7 +99,7 @@ class RetestLabTests(unittest.TestCase):
                     def agent_prod():
                         launch("deploy.yml")
 
-                    def staging_path():
+                    def agent_staging():
                         launch("staging.yml")
 
                     def launch(workflow):
@@ -125,11 +125,16 @@ class RetestLabTests(unittest.TestCase):
             )
 
             graph = build_graph(root)
-            graph.roots = {"function:agent_prod"}
             from retest_lab.analyzer import find_counterexample
 
-            finding = find_counterexample(graph)
-            self.assertEqual(finding.status, "UNKNOWN")
+            graph.roots = {"function:agent_prod"}
+            prod = find_counterexample(graph)
+            self.assertEqual(prod.status, "COUNTEREXAMPLE_FOUND")
+            self.assertIn("workflow:deploy.yml", prod.path)
+
+            graph.roots = {"function:agent_staging"}
+            staging = find_counterexample(graph)
+            self.assertEqual(staging.status, "UNKNOWN")
 
     def test_graph_links_shell_to_workflow_to_consequence(self):
         graph = build_graph(FIXTURE)
