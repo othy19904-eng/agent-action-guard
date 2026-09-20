@@ -67,6 +67,17 @@ Current scope is deliberately narrow: Python + GitHub Actions consequence
 paths, with conservative outcomes. `COVERED_WITHIN_MODEL` is not a claim of
 repository-wide completeness, and `UNKNOWN` is never a safety guarantee.
 
+## Testing it on a real repository?
+
+Please open a GitHub issue and include only:
+
+- the returned status: `COUNTEREXAMPLE_FOUND`, `COVERED_WITHIN_MODEL`, or `UNKNOWN`;
+- whether the reported path was real or a false positive;
+- whether this check would be useful enough to keep in CI.
+
+Do not include private source code, credentials, or proprietary repository
+details.
+
 ---
 
 ## Existing policy evaluator
