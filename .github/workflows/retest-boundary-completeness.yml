@@ -13,7 +13,7 @@ jobs:
           python-version: "3.12"
       - name: Run analyzer and CLI tests
         run: |
-          python -m unittest tests.test_retest_lab tests.test_retest_cli -v
+          python -m unittest tests.test_retest_lab tests.test_retest_cli tests.test_runtime_witness -v
       - name: Smoke test path-tracing CLI
         run: |
           python -m retest_lab scan \
@@ -32,3 +32,20 @@ jobs:
           printf '%s\n' "$output"
           test "$code" -eq 1
           grep -q '"status": "COUNTEREXAMPLE_FOUND"' <<<"$output"
+      - name: Smoke test runtime witness CLI
+        shell: bash
+        run: |
+          cat > /tmp/runtime-trace.jsonl <<'EOF'
+          {"seq":1,"kind":"root","name":"agent"}
+          {"seq":2,"kind":"effect","name":"shell.exec"}
+          {"seq":3,"kind":"workflow","name":"deploy.yml"}
+          {"seq":4,"kind":"consequence","name":"production_deploy"}
+          {"seq":5,"kind":"attestation","name":"trace_complete","parent_seq":4}
+          EOF
+          set +e
+          output="$(runtime-witness /tmp/runtime-trace.jsonl --consequence production_deploy --boundary approval:P --json)"
+          code=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$code" -eq 1
+          grep -q '"status": "OBSERVED_BYPASS"' <<<"$output"
