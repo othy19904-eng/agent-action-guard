@@ -56,3 +56,14 @@ jobs:
         env:
           OPENAI_API_KEY: ""
         run: python -m unittest tests.test_openai_agents_adapter -v
+      - name: Smoke test documented OpenAI Agents demo
+        env:
+          OPENAI_API_KEY: ""
+        shell: bash
+        run: |
+          guarded="$(python examples/openai_agents_runtime_witness.py --mode guarded)"
+          bypass="$(python examples/openai_agents_runtime_witness.py --mode bypass)"
+          printf '%s\n' "$guarded"
+          printf '%s\n' "$bypass"
+          grep -q '"status": "BOUNDARY_OBSERVED"' <<<"$guarded"
+          grep -q '"status": "OBSERVED_BYPASS"' <<<"$bypass"
