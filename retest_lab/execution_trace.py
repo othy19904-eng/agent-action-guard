@@ -79,6 +79,9 @@ class ExecutionTraceRecorder:
     def tool(self, name: str, *, evidence: str | None = None) -> int:
         return self._emit("tool", name, evidence=evidence)
 
+    def effect(self, name: str, *, evidence: str | None = None) -> int:
+        return self._emit("effect", name, evidence=evidence)
+
     def run_subprocess(
         self,
         argv: Sequence[str],
