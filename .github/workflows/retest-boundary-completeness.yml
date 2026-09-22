@@ -49,3 +49,10 @@ jobs:
           printf '%s\n' "$output"
           test "$code" -eq 1
           grep -q '"status": "OBSERVED_BYPASS"' <<<"$output"
+
+      - name: Install OpenAI Agents adapter extra
+        run: python -m pip install ".[openai-agents]"
+      - name: Run OpenAI Agents adapter integration tests
+        env:
+          OPENAI_API_KEY: ""
+        run: python -m unittest tests.test_openai_agents_adapter -v
