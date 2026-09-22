@@ -22,6 +22,7 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
                     '{"seq":2,"kind":"boundary","name":"approval:P"}',
                     '{"seq":3,"kind":"workflow","name":"deploy.yml"}',
                     '{"seq":4,"kind":"consequence","name":"production_deploy"}',
+                    '{"seq":5,"kind":"attestation","name":"trace_complete","parent_seq":4}',
                 ]
             )
         )
@@ -45,6 +46,7 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
                     '{"seq":2,"kind":"effect","name":"shell.exec","evidence":"app.py:42"}',
                     '{"seq":3,"kind":"workflow","name":"deploy.yml","evidence":"gh workflow run deploy.yml"}',
                     '{"seq":4,"kind":"consequence","name":"production_deploy"}',
+                    '{"seq":5,"kind":"attestation","name":"trace_complete","parent_seq":4}',
                 ]
             )
         )
@@ -64,6 +66,7 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
                     '{"seq":3,"kind":"boundary","name":"approval:P"}',
                     '{"seq":4,"kind":"workflow","name":"deploy.yml"}',
                     '{"seq":5,"kind":"consequence","name":"production_deploy"}',
+                    '{"seq":6,"kind":"attestation","name":"trace_complete","parent_seq":5}',
                 ]
             )
         )
@@ -92,6 +95,7 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
                     '{"seq":2,"kind":"boundary","name":"approval:P"}',
                     '{"seq":3,"kind":"consequence","name":"production_deploy"}',
                     '{"seq":4,"kind":"consequence","name":"production_deploy","parent_seq":1}',
+                    '{"seq":5,"kind":"attestation","name":"trace_complete","parent_seq":4}',
                 ]
             )
         )
@@ -108,6 +112,7 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
                     '{"seq":3,"kind":"effect","name":"shell.exec","parent_seq":1}',
                     '{"seq":4,"kind":"workflow","name":"deploy.yml","parent_seq":3}',
                     '{"seq":5,"kind":"consequence","name":"production_deploy","parent_seq":4}',
+                    '{"seq":6,"kind":"attestation","name":"trace_complete","parent_seq":5}',
                 ]
             )
         )
@@ -117,6 +122,33 @@ class RuntimeWitnessAcceptanceTests(unittest.TestCase):
 
 
 class RuntimeWitnessValidationTests(unittest.TestCase):
+    def test_missing_complete_attestation_is_unresolved(self) -> None:
+        result = verify(
+            "\n".join(
+                [
+                    '{"seq":1,"kind":"root","name":"agent"}',
+                    '{"seq":2,"kind":"effect","name":"shell.exec"}',
+                    '{"seq":3,"kind":"consequence","name":"production_deploy"}',
+                ]
+            )
+        )
+        self.assertEqual(result.status, "UNRESOLVED_TRACE")
+        self.assertIn("trace_complete", result.reason)
+
+    def test_complete_attestation_must_reference_consequence(self) -> None:
+        result = verify(
+            "\n".join(
+                [
+                    '{"seq":1,"kind":"root","name":"agent"}',
+                    '{"seq":2,"kind":"effect","name":"shell.exec"}',
+                    '{"seq":3,"kind":"consequence","name":"production_deploy"}',
+                    '{"seq":4,"kind":"attestation","name":"trace_complete","parent_seq":2}',
+                ]
+            )
+        )
+        self.assertEqual(result.status, "UNRESOLVED_TRACE")
+        self.assertIn("reference", result.reason)
+
     def test_unknown_field_fails_closed(self) -> None:
         result = verify(
             "\n".join(
@@ -151,4 +183,3 @@ class RuntimeWitnessValidationTests(unittest.TestCase):
             )
         )
         self.assertEqual(result.status, "UNRESOLVED_TRACE")
-
