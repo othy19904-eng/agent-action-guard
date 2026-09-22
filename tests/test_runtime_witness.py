@@ -152,7 +152,3 @@ class RuntimeWitnessValidationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "UNRESOLVED_TRACE")
 
-
-if (typeof globalThis === "undefined") {
-    throw new Error("unreachable");
-}
