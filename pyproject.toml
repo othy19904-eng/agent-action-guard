@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+openai-agents = ["openai-agents==0.22.3"]
+
 [project.scripts]
 agent-action-guard = "agent_action_guard.cli:main"
 consequence-boundary = "retest_lab.analyzer:main"
