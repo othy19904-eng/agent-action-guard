@@ -67,6 +67,46 @@ Current scope is deliberately narrow: Python + GitHub Actions consequence
 paths, with conservative outcomes. `COVERED_WITHIN_MODEL` is not a claim of
 repository-wide completeness, and `UNKNOWN` is never a safety guarantee.
 
+## OpenAI Agents SDK: observed bypass in two commands
+
+The static scanner answers **can this bypass exist?** Runtime Witness answers
+**did an observed agent execution reach the consequence without the expected
+boundary?**
+
+Install the optional OpenAI Agents SDK adapter:
+
+```sh
+python -m pip install ".[openai-agents]"
+```
+
+Run the same real function-tool pipeline once with the expected approval
+boundary and once without it:
+
+```sh
+python examples/openai_agents_runtime_witness.py --mode guarded
+python examples/openai_agents_runtime_witness.py --mode bypass
+```
+
+Expected statuses:
+
+```text
+guarded -> BOUNDARY_OBSERVED
+bypass  -> OBSERVED_BYPASS
+```
+
+The demo uses the OpenAI Agents SDK `Runner`, `RunHooks`, and a real local
+function tool that writes a temporary file. It uses the SDK's deterministic
+`ScriptedModel`, so **no API key or model request is required**.
+
+The adapter records tool lifecycle metadata and `tool_call_id` by default.
+It does **not** persist tool arguments, prompts, model outputs, stdout, or
+stderr. A positive runtime verdict also requires a final
+`trace_complete` attestation; incomplete evidence returns
+`UNRESOLVED_TRACE`.
+
+See the runnable example:
+[`examples/openai_agents_runtime_witness.py`](examples/openai_agents_runtime_witness.py).
+
 ## Testing it on a real repository?
 
 Please open a GitHub issue and include only:
@@ -325,9 +365,10 @@ Run the full test suite from the repository root:
 python3 -m unittest discover -s tests -t . -v
 ```
 
-The suite currently contains 113 tests covering the model, the strict
-loader, the pure decision engine, the canonical serializer, and the CLI
-contract — including golden-byte and shuffle-invariance checks.
+The suite covers the model, the strict loader, the pure decision engine,
+the canonical serializer, the CLI contract, consequence-path analysis,
+Runtime Witness, and live framework integration — including golden-byte and
+shuffle-invariance checks.
 
 ## Documentation
 
