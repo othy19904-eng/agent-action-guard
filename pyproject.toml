@@ -13,6 +13,7 @@ dependencies = []
 [project.scripts]
 agent-action-guard = "agent_action_guard.cli:main"
 consequence-boundary = "retest_lab.analyzer:main"
+runtime-witness = "retest_lab.runtime_witness:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_action_guard*", "retest_lab*"]
