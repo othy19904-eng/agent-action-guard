@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-_ALLOWED_KINDS = {"root", "effect", "tool", "workflow", "boundary", "consequence"}
+_ALLOWED_KINDS = {"root", "effect", "tool", "workflow", "boundary", "consequence", "attestation"}
 _ALLOWED_FIELDS = {"seq", "kind", "name", "parent_seq", "evidence"}
 
 
@@ -281,6 +281,33 @@ def verify_events(
         )
 
     target = matches[0]
+
+    completions = [
+        event
+        for event in items
+        if event.kind == "attestation" and event.name == "trace_complete"
+    ]
+    if len(completions) != 1:
+        return _result_from_error(
+            consequence,
+            expected_boundary,
+            "exactly one trace_complete attestation is required",
+        )
+
+    completion = completions[0]
+    if completion.seq != max(event.seq for event in items):
+        return _result_from_error(
+            consequence,
+            expected_boundary,
+            "trace_complete attestation must be the final event",
+        )
+    if completion.parent_seq != target.seq:
+        return _result_from_error(
+            consequence,
+            expected_boundary,
+            "trace_complete attestation must reference the protected consequence",
+        )
+
     try:
         path_events = _reconstruct_path(events_by_seq, target)
     except TraceError as exc:
