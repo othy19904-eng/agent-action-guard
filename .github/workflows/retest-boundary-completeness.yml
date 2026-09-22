@@ -40,6 +40,7 @@ jobs:
           {"seq":2,"kind":"effect","name":"shell.exec"}
           {"seq":3,"kind":"workflow","name":"deploy.yml"}
           {"seq":4,"kind":"consequence","name":"production_deploy"}
+          {"seq":5,"kind":"attestation","name":"trace_complete","parent_seq":4}
           EOF
           set +e
           output="$(runtime-witness /tmp/runtime-trace.jsonl --consequence production_deploy --boundary approval:P --json)"
